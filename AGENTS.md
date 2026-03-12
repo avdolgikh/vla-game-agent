@@ -16,6 +16,33 @@ _Document every significant decision here as it happens._
 - **2026-03-12**: Chose Crafter as primary environment (over ViZDoom). Reason: cleaner instruction-following story, lower overhead, faster iteration.
 - **2026-03-12**: Agentic TDD pipeline is the **only** development workflow. All features go through: spec → tests → review → implement → review → done. No ad-hoc coding.
 - **2026-03-12**: UV is the sole package/environment manager. No pip, no conda, no poetry.
+- **2026-03-12**: Pipeline auto-resumes from last completed stage via `.pipeline-state/<task-id>.json`. No manual step parameter needed.
+- **2026-03-12**: Pipeline guardrails added: test freeze enforcement (`git diff -- tests/`), pytest gate after code revisions, reviewer feedback forwarded to revision agents, full transcript logging to `.pipeline-state/<task-id>.log`.
+
+---
+
+## Milestone Status
+
+| Milestone | Description | Status |
+|-----------|-------------|--------|
+| MVP-0a | Env wrapper + random rollout | **Done** (84 tests, all passing) |
+| MVP-0b | Scripted policies + trajectory data | Next up (no spec yet) |
+| MVP-1 | Vision-only imitation baseline | Planned |
+| MVP-2 | Instruction-conditioned policy | Planned |
+| MVP-3 | Portfolio polish | Planned |
+
+### MVP-0a Deliverables (done)
+
+- `src/vla_agent/envs/crafter_env.py` — Gymnasium-style wrapper, 7-action reduced space
+- `scripts/random_rollout.py` — random policy rollout, saves frames + episode.json + optional mp4
+- 84 tests across `test_crafter_env.py` and `test_random_rollout.py`
+
+### MVP-0b Ideas (next, no spec yet)
+
+- **Scripted policies** for the 3 narrow v1 tasks: `collect wood`, `collect stone`, `place table`
+- **Trajectory / dataset schema** to store `(obs, action, instruction, reward, metadata)` per step
+- **Data collection script** that runs scripted policies and saves trajectories to disk
+- This directly feeds MVP-1 (training a vision-only imitation baseline)
 
 ---
 
@@ -106,3 +133,9 @@ specs/                 # approved specs
 - **Spec files**: `specs/<task-id>-spec.md`
 - **No print in library code**. Only scripts print.
 - **Imports**: absolute from `vla_agent` package (e.g., `from vla_agent.envs.crafter_env import CrafterEnv`).
+
+## TODO / Consider Later
+
+- **Pin Python version via UV**: `uv python pin 3.12` to create `.python-version` so all environments use the exact same Python.
+- **Script entry points in `pyproject.toml`**: define `[project.scripts]` so scripts are invoked as `uv run random-rollout` instead of `uv run python scripts/random_rollout.py`.
+- **`uv run pytest` broken on Windows (UV 0.8.x)**: script shim canonicalization bug. Workaround: `uv run python -m pytest`. Revisit when UV releases a fix.

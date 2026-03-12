@@ -11,3 +11,4 @@ artifacts/
 *.mp4
 .env
 .claude/settings.local.json
+.pipeline-state/
