@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+dist/
+build/
+artifacts/
+.ruff_cache/
+.pytest_cache/
+*.mp4
+.env
+.claude/settings.local.json
