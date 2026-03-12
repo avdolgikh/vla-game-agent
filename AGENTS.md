@@ -35,12 +35,13 @@ Do not defer documentation. If you make a choice, write it down here before movi
 All production code is developed through the pipeline defined in `specs/agentic-pipeline.md`:
 
 ```
-spec (human-approved) → tests (sonnet) → test review (opus) → implement (sonnet) → code review (opus) → done
+spec (human-approved) → tests (sonnet) → test review (opus) → implement (sonnet) → validate (sonnet) → code review (opus) → done
 ```
 
 - Every feature starts as an approved spec in `specs/`.
 - Tests are written first, reviewed, then frozen.
 - Implementation is written against frozen tests.
+- After tests pass, a validation stage runs actual scripts/code from the spec end-to-end.
 - No ad-hoc coding outside this pipeline.
 
 ## Rule #4: Spec-Driven Development

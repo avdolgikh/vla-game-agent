@@ -4,13 +4,16 @@ set -euo pipefail
 # Allow running from within a Claude Code session
 unset CLAUDECODE 2>/dev/null || true
 
+# Ensure claude CLI is on PATH
+export PATH="$HOME/.local/bin:$PATH"
+
+# Usage (from PowerShell): & "C:\Program Files\Git\bin\bash.exe" -l scripts/run_pipeline.sh <task-id>
 TASK="${1:?Usage: ./scripts/run_pipeline.sh <task-id>}"
 SPEC="specs/${TASK}-spec.md"
 MAX_REVISIONS=2
 
-# Permission mode: agents that write code get acceptEdits, reviewer is read-only
-WRITE_PERMS="--permission-mode acceptEdits"
-READ_PERMS="--permission-mode default"
+# Permission mode: bypassPermissions needed for headless agents to run Bash (uv run pytest)
+AGENT_PERMS="--permission-mode bypassPermissions"
 
 REVIEW_SCHEMA='{"type":"object","properties":{"decision":{"type":"string","enum":["approve","revise"]},"summary":{"type":"string"},"blocking":{"type":"array","items":{"type":"string"}}},"required":["decision","summary"]}'
 
@@ -21,8 +24,7 @@ json_get() {
 
 review() {
   local prompt="$1"
-  claude -p "$prompt" --agent reviewer $READ_PERMS \
-    --output-format json --json-schema "$REVIEW_SCHEMA"
+  claude -p "$prompt" --agent reviewer $AGENT_PERMS --output-format json --json-schema "$REVIEW_SCHEMA"
 }
 
 decision_of() {
@@ -56,8 +58,7 @@ echo ""
 echo "========================================="
 echo "=== Stage 1: Test Generation (sonnet) ==="
 echo "========================================="
-claude -p "Read ${SPEC} and AGENTS.md. Write tests for task '${TASK}' covering all acceptance criteria. Create test files in tests/. Run 'uv run pytest' to confirm tests fail (red) for unimplemented code. Do NOT write production code." \
-  --agent test-writer $WRITE_PERMS
+claude -p "Read ${SPEC} and AGENTS.md. Write tests for task '${TASK}' covering all acceptance criteria. Create test files in tests/. Run 'uv run pytest' to confirm tests fail for unimplemented code. Do NOT write production code." --agent test-writer $AGENT_PERMS
 echo ""
 
 # --- 2. Review tests (bounded loop) ---
@@ -87,8 +88,7 @@ so = d.get('structured_output', d)
 for b in so.get('blocking', []):
     print(b)
 " 2>/dev/null) || BLOCKING=""
-  claude -p "Revise tests for '${TASK}'. Reviewer feedback: ${BLOCKING}. Read ${SPEC} for context. Do NOT touch production code. Run 'uv run pytest' after revisions." \
-    --agent test-writer $WRITE_PERMS
+  claude -p "Revise tests for '${TASK}'. Reviewer feedback: ${BLOCKING}. Read ${SPEC} for context. Do NOT touch production code. Run 'uv run pytest' after revisions." --agent test-writer $AGENT_PERMS
 done
 echo ""
 echo ">>> Tests frozen <<<"
@@ -98,14 +98,20 @@ echo ""
 echo "============================================="
 echo "=== Stage 3: Implementation (sonnet)      ==="
 echo "============================================="
-claude -p "Read ${SPEC} and AGENTS.md. Read the frozen tests in tests/. Implement the minimal production code for task '${TASK}' to make all tests pass. Do NOT modify any test files. Run 'uv run pytest' to verify. Keep iterating until all tests pass." \
-  --agent implementer $WRITE_PERMS
+claude -p "Read ${SPEC} and AGENTS.md. Read the frozen tests in tests/. Implement the minimal production code for task '${TASK}' to make all tests pass. Do NOT modify any test files. Run 'uv run pytest' to verify. Keep iterating until all tests pass." --agent implementer $AGENT_PERMS
 echo ""
 
-# --- 4. Review code (bounded loop) ---
+# --- 4. Validation: run actual scripts/code from the spec ---
+echo "============================================="
+echo "=== Stage 4: Validation (sonnet)           ==="
+echo "============================================="
+claude -p "Read ${SPEC} and AGENTS.md. All tests pass. Now validate the implementation end-to-end: if the spec defines any runnable scripts or CLI commands, run them to verify they actually work. For example, if the spec defines a rollout script, run it with default/minimal arguments. If the spec has no runnable scripts, run 'uv run python -c ...' to import and exercise the main functions. Fix any issues you find. Do NOT modify test files. Run 'uv run pytest' at the end to confirm tests still pass." --agent implementer $AGENT_PERMS
+echo ""
+
+# --- 5. Review code (bounded loop) ---
 for ((i=0; i<=MAX_REVISIONS; i++)); do
   echo "============================================="
-  echo "=== Stage 4: Code Review (opus, iter $i) ==="
+  echo "=== Stage 5: Code Review (opus, iter $i) ==="
   echo "============================================="
   RESULT=$(review "Read ${SPEC} and AGENTS.md. Review the implementation for task '${TASK}' against the spec and frozen tests. Run 'uv run pytest' to check status. Return JSON with your decision.")
   pretty_json "$RESULT"
@@ -121,7 +127,7 @@ for ((i=0; i<=MAX_REVISIONS; i++)); do
   fi
 
   echo ""
-  echo "=== Stage 4b: Code Revision (sonnet, iter $i) ==="
+  echo "=== Stage 5b: Code Revision (sonnet, iter $i) ==="
   BLOCKING=$(echo "$RESULT" | python -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -129,8 +135,7 @@ so = d.get('structured_output', d)
 for b in so.get('blocking', []):
     print(b)
 " 2>/dev/null) || BLOCKING=""
-  claude -p "Revise implementation for '${TASK}'. Reviewer feedback: ${BLOCKING}. Read ${SPEC} for context. Do NOT modify frozen tests. Run 'uv run pytest' after revisions." \
-    --agent implementer $WRITE_PERMS
+  claude -p "Revise implementation for '${TASK}'. Reviewer feedback: ${BLOCKING}. Read ${SPEC} for context. Do NOT modify frozen tests. Run 'uv run pytest' after revisions." --agent implementer $AGENT_PERMS
 done
 
 echo ""
