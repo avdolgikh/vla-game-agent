@@ -138,4 +138,3 @@ specs/                 # approved specs
 
 - **Pin Python version via UV**: `uv python pin 3.12` to create `.python-version` so all environments use the exact same Python.
 - **Script entry points in `pyproject.toml`**: define `[project.scripts]` so scripts are invoked as `uv run random-rollout` instead of `uv run python scripts/random_rollout.py`.
-- **`uv run pytest` broken on Windows (UV 0.8.x)**: script shim canonicalization bug. Workaround: `uv run python -m pytest`. Revisit when UV releases a fix.
