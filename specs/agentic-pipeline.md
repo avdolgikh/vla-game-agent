@@ -28,12 +28,12 @@ Bash orchestrator (run_pipeline.sh)
 SPEC_APPROVED (human)
   → TESTS_GENERATED
   → TESTS_REVIEWED ←─╮
-  → TESTS_REVISED ────╯  (max 2 iterations)
+  → TESTS_REVISED ────╯  (max 4 iterations)
   → TESTS_FROZEN
   → CODE_IMPLEMENTED
   → CODE_VALIDATED
   → CODE_REVIEWED  ←─╮
-  → CODE_REVISED  ────╯  (max 2 iterations)
+  → CODE_REVISED  ────╯  (max 4 iterations)
   → DONE
 ```
 
@@ -155,7 +155,7 @@ Reviewer `blocking` items are extracted and passed verbatim to revision agents, 
 
 ## Guardrails
 
-- **Revision caps**: 2 per loop (tests and code). Prevents drift.
+- **Revision caps**: 4 per loop (tests and code). Prevents drift.
 - **Frozen tests**: after implementation, validation, and code revisions, `git diff -- tests/` is checked. Any modifications to test files abort the pipeline (exit 4).
 - **Pytest gate**: after each code revision, `uv run pytest` must pass. Failures abort the pipeline (exit 5).
 - **Reviewer is read-only**: no Write/Edit tools. Findings only.

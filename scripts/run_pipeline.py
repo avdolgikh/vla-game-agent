@@ -23,7 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-revisions",
         type=int,
-        default=2,
+        default=4,
         help="Maximum revision attempts per review loop.",
     )
     return parser.parse_args()

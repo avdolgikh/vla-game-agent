@@ -61,7 +61,6 @@ class CodexProvider:
         self,
         *,
         role: str,
-        prompt: str,
         repo_root: Path,
         output_path: Path,
         schema_path: Path | None,
@@ -85,7 +84,8 @@ class CodexProvider:
         ]
         if schema_path is not None:
             command.extend(["--output-schema", str(schema_path)])
-        command.append(prompt)
+        # Feed prompts via stdin to avoid Windows command-line length limits.
+        command.append("-")
         return command
 
     def run_role(
@@ -113,7 +113,6 @@ class CodexProvider:
         result = subprocess.run(
             self._command(
                 role=role,
-                prompt=prompt,
                 repo_root=repo_root,
                 output_path=output_path,
                 schema_path=schema_path,
@@ -124,6 +123,7 @@ class CodexProvider:
             text=True,
             encoding="utf-8",
             errors="replace",
+            input=prompt,
         )
         final_message = output_path.read_text(encoding="utf-8") if output_path.exists() else ""
         output = final_message.strip()

@@ -1,7 +1,39 @@
-"""Tests for vla_agent.envs.crafter_env — covering all acceptance criteria from hello-crafter-spec.md."""
+"""Tests for vla_agent.envs.crafter_env — covering all acceptance criteria from mvp-0b-spec.md."""
 
 import numpy as np
 import pytest
+
+
+def _assert_player_state(info: dict) -> None:
+    """Helper to assert that info exposes player_pos/player_facing tuples of ints."""
+    for key in ("player_pos", "player_facing"):
+        assert key in info, f"info from CrafterEnv must include '{key}'"
+        value = info[key]
+        assert isinstance(value, tuple), f"'{key}' must be a tuple, got {type(value)}"
+        assert len(value) == 2, f"'{key}' must contain two coordinates"
+        assert all(isinstance(coord, int) for coord in value), (
+            f"Coordinates in '{key}' must be ints, got {value}"
+        )
+
+
+def _find_valid_place_table_direction(player, world) -> tuple[int, int]:
+    """Return a cardinal direction that faces a valid table placement cell."""
+    pos = np.array(player.pos, dtype=int)
+    area = tuple(int(dim) for dim in world.area)
+    for dx, dy in ((0, 1), (0, -1), (-1, 0), (1, 0)):
+        target = pos + np.array([dx, dy], dtype=int)
+        if not (0 <= target[0] < area[0] and 0 <= target[1] < area[1]):
+            continue
+        target_tuple = (int(target[0]), int(target[1]))
+        mat_id = int(world._mat_map[target_tuple])
+        material = world._mat_names[mat_id]
+        if material not in ("grass", "path", "sand"):
+            continue
+        if world._obj_map[target_tuple] != 0:
+            continue
+        return dx, dy
+    pytest.fail("Unable to find an adjacent cell suitable for table placement.")
+
 
 # ---------------------------------------------------------------------------
 # AC-1: Package import works
@@ -18,33 +50,34 @@ def test_import_crafter_env():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.integration
 class TestCrafterEnvInterface:
     """AC-2: Static interface properties — num_actions and action_names."""
 
     def test_num_actions(self):
-        """env.num_actions must equal 7."""
+        """env.num_actions must equal 8."""
         from vla_agent.envs.crafter_env import CrafterEnv
 
         env = CrafterEnv(seed=0)
         try:
-            assert env.num_actions == 7
+            assert env.num_actions == 8
         finally:
             env.close()
 
     def test_action_names_type_and_length(self):
-        """env.action_names must be a list of 7 strings."""
+        """env.action_names must be a list of 8 strings."""
         from vla_agent.envs.crafter_env import CrafterEnv
 
         env = CrafterEnv(seed=0)
         try:
             assert isinstance(env.action_names, list)
-            assert len(env.action_names) == 7
+            assert len(env.action_names) == 8
             assert all(isinstance(n, str) for n in env.action_names)
         finally:
             env.close()
 
     def test_action_names_exact_order(self):
-        """env.action_names must match the exact 7-element list from the spec."""
+        """env.action_names must match the exact 8-element list from the spec."""
         from vla_agent.envs.crafter_env import CrafterEnv
 
         expected = [
@@ -55,6 +88,7 @@ class TestCrafterEnvInterface:
             "move_down",
             "do",
             "place_table",
+            "make_wood_pickaxe",
         ]
         env = CrafterEnv(seed=0)
         try:
@@ -63,14 +97,14 @@ class TestCrafterEnvInterface:
             env.close()
 
     def test_step_out_of_range_high_raises_value_error(self):
-        """step(7) must raise ValueError (one above valid range 0-6)."""
+        """step(8) must raise ValueError (one above valid range 0-7)."""
         from vla_agent.envs.crafter_env import CrafterEnv
 
         env = CrafterEnv(seed=0)
         try:
             env.reset()
             with pytest.raises(ValueError):
-                env.step(7)
+                env.step(8)
         finally:
             env.close()
 
@@ -111,9 +145,11 @@ FULL_ACTION_MAP = {
     4: 4,  # move_down → 4
     5: 5,  # do → 5
     6: 8,  # place_table → 8
+    7: 11,  # make_wood_pickaxe → 11
 }
 
 
+@pytest.mark.integration
 class TestActionMapping:
     """AC-3: Reduced-action-to-full-action index mapping."""
 
@@ -170,8 +206,21 @@ class TestActionMapping:
         finally:
             env.close()
 
+    def test_action_map_make_wood_pickaxe_maps_to_11(self):
+        """Reduced action 7 must map to full Crafter action 11 (make_wood_pickaxe)."""
+        from vla_agent.envs.crafter_env import CrafterEnv
+
+        env = CrafterEnv(seed=0)
+        try:
+            mapping = getattr(env, "action_map", None) or getattr(env, "_action_map")
+            assert mapping[7] == 11, (
+                f"make_wood_pickaxe (reduced=7) must map to full index 11, got {mapping[7]}"
+            )
+        finally:
+            env.close()
+
     def test_action_map_all_entries(self):
-        """All 7 reduced actions must map to the correct full Crafter indices."""
+        """All 8 reduced actions must map to the correct full Crafter indices."""
         from vla_agent.envs.crafter_env import CrafterEnv
 
         env = CrafterEnv(seed=0)
@@ -248,6 +297,17 @@ class TestCrafterEnvIntegration:
         try:
             _, info = env.reset()
             assert "achievements" in info, "info from reset() must contain 'achievements'"
+        finally:
+            env.close()
+
+    def test_reset_info_has_player_state(self):
+        """reset() info dict must expose player position and facing."""
+        from vla_agent.envs.crafter_env import CrafterEnv
+
+        env = CrafterEnv(seed=0)
+        try:
+            _, info = env.reset()
+            _assert_player_state(info)
         finally:
             env.close()
 
@@ -366,11 +426,51 @@ class TestCrafterEnvIntegration:
         finally:
             env.close()
 
-    def test_step_all_valid_reduced_actions(self):
-        """All 7 reduced actions (0-6) must be accepted without error."""
+    def test_step_info_has_player_state(self):
+        """step() info dict must expose player position and facing."""
         from vla_agent.envs.crafter_env import CrafterEnv
 
-        for action in range(7):
+        env = CrafterEnv(seed=0)
+        try:
+            env.reset()
+            _, _, _, _, info = env.step(0)
+            _assert_player_state(info)
+        finally:
+            env.close()
+
+    def test_make_wood_pickaxe_requires_table_and_wood(self):
+        """
+        make_wood_pickaxe must succeed once a table is placed nearby and wood is available.
+        """
+        from vla_agent.envs.crafter_env import CrafterEnv
+
+        env = CrafterEnv(seed=0)
+        try:
+            env.reset()
+            player = env._env._player
+            world = env._env._world
+            dx, dy = _find_valid_place_table_direction(player, world)
+            player.inventory["wood"] = 2
+            player.facing = (dx, dy)
+            _, _, _, _, info = env.step(6)
+            assert info["achievements"].get("place_table", 0) >= 1
+            player_pos = tuple(int(coord) for coord in player.pos)
+            target_pos = (player_pos[0] + dx, player_pos[1] + dy)
+            material, obj = world[target_pos]
+            assert material == "table"
+            assert obj is not None
+            player.inventory["wood"] = 1
+            player.facing = (dx, dy)
+            _, _, _, _, info = env.step(7)
+            assert info["inventory"].get("wood_pickaxe", 0) >= 1
+        finally:
+            env.close()
+
+    def test_step_all_valid_reduced_actions(self):
+        """All 8 reduced actions (0-7) must be accepted without error."""
+        from vla_agent.envs.crafter_env import CrafterEnv
+
+        for action in range(8):
             env = CrafterEnv(seed=0)
             try:
                 env.reset()

@@ -1,7 +1,9 @@
 """Unit tests for provider-agnostic pipeline core helpers."""
 
+import io
 import json
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -469,3 +471,21 @@ def test_run_pytest_gate_fails_on_nonzero_exit(tmp_path: Path, monkeypatch):
     with pytest.raises(PipelineError) as exc_info:
         runner._run_pytest_gate("Gate: pytest after code revision")
     assert exc_info.value.exit_code == EXIT_TESTS_BROKE_AFTER_REVISION
+
+
+def test_pipeline_logger_replaces_unencodable_console_output(tmp_path: Path, monkeypatch):
+    from vla_agent.pipeline.core import PipelineLogger
+
+    class FakeStdout:
+        def __init__(self) -> None:
+            self.buffer = io.BytesIO()
+            self.encoding = "cp1252"
+
+    fake_stdout = FakeStdout()
+    monkeypatch.setattr(sys, "stdout", fake_stdout)
+
+    logger = PipelineLogger(tmp_path / "pipeline.log")
+    logger.log("unicode \u2192 output")
+
+    assert fake_stdout.buffer.getvalue().decode("cp1252") == "unicode ? output\n"
+    assert (tmp_path / "pipeline.log").read_text(encoding="utf-8") == "unicode \u2192 output\n"

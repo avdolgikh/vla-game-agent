@@ -32,6 +32,9 @@ Document every significant decision here as it happens.
 - **2026-03-13**: Reviewer artifact snapshots prioritize spec-referenced files before unrelated repository files.
 - **2026-03-13**: Next provider expansion target is the local Gemini CLI runtime.
 - **2026-03-13**: Gemini provider scope is centered on reliable non-interactive local CLI execution and reviewer-output normalization, not on speculative provider-specific flags. Windows executable resolution and subprocess diagnostics are first-class requirements; approval-mode details stay adapter-level unless proven necessary by the CLI.
+- **2026-03-13**: On Windows, Codex provider prompts must be sent via stdin (codex exec -) rather than as a positional CLI argument to avoid command-line length failures on large embedded specs/prompts.
+- **2026-03-13**: Pipeline logging on this Windows console must tolerate non-ASCII provider output by writing to stdout with encoding replacement instead of raw print(), while preserving UTF-8 transcripts on disk.
+- **2026-03-13**: Repo rule added: preserve existing document encoding and visible typography in specs/docs unless the user explicitly requests formatting or character-set changes.
 
 ---
 
@@ -40,7 +43,7 @@ Document every significant decision here as it happens.
 | Milestone | Description | Status |
 |-----------|-------------|--------|
 | MVP-0a | Env wrapper + random rollout | **Done** (84 tests, all passing) |
-| MVP-0b | Scripted policies + trajectory data | Next up (no spec yet) |
+| MVP-0b | Scripted policies + trajectory data | **Done** (104 tests, all passing) |
 | MVP-1 | Vision-only imitation baseline | Planned |
 | MVP-2 | Instruction-conditioned policy | Planned |
 | MVP-3 | Portfolio polish | Planned |
@@ -51,11 +54,31 @@ Document every significant decision here as it happens.
 - `scripts/random_rollout.py` - Random policy rollout, saves frames + `episode.json` + optional mp4
 - 84 tests across `test_crafter_env.py` and `test_random_rollout.py`
 
-### MVP-0b Ideas
+### MVP-0b Deliverables (spec: `specs/mvp-0b-spec.md`)
 
-- Scripted policies for `collect wood`, `collect stone`, `place table`
-- Trajectory / dataset schema for `(obs, action, instruction, reward, metadata)`
-- Data collection script that runs scripted policies and saves trajectories to disk
+- `src/vla_agent/envs/crafter_env.py` - Expanded to 8-action space (added `make_wood_pickaxe`), info dict has `player_pos` + `player_facing`
+- `src/vla_agent/policies.py` - Three scripted policies: `CollectWoodPolicy`, `PlaceTablePolicy`, `CollectStonePolicy` with shared `GreedyNavigator`
+- `scripts/collect_trajectories.py` - Data collection script, saves `.npz` + `manifest.json`
+- `tests/test_policies.py` + `tests/test_data_collection.py` - 20 new tests (104 total)
+- Trajectory format: `observations (T+1, 64, 64, 3)`, `actions (T,)`, `rewards (T,)` per episode
+- MVP-0a tests updated for 8-action space
+
+### How to Run MVP-0b
+
+```bash
+# Run tests
+uv run python -m pytest
+
+# Collect trajectories (one command per policy)
+uv run python scripts/collect_trajectories.py --policy collect_wood --num-episodes 10
+uv run python scripts/collect_trajectories.py --policy place_table --num-episodes 10
+uv run python scripts/collect_trajectories.py --policy collect_stone --num-episodes 10
+
+# CLI defaults: --base-seed 42, --max-steps 300, --output-dir artifacts/trajectories/<policy>
+# Outputs: artifacts/trajectories/<policy>/manifest.json + episode_NNN.npz files
+```
+
+**Status:** Code is implemented and tests pass (104). Trajectory data has NOT been collected yet. Next step: run the three commands above, verify outputs, then commit and move to MVP-1.
 
 ---
 
@@ -113,6 +136,12 @@ spec (human-approved) -> tests -> test review -> implement -> validate -> code r
 - Minimal dependencies.
 - Prefer the smallest correct diff.
 
+## Rule #9: Preserve Existing Document Encoding & Typography
+
+- Do not rewrite existing Unicode symbols, typography, or file encoding in docs/specs unless the user explicitly requests it.
+- Do not replace arrows, box-drawing characters, bullets, quotes, or similar formatting with different characters as a side effect of unrelated edits.
+- If a document requires content edits, preserve its existing visible text formatting exactly unless the requested task is specifically about documentation formatting.
+
 ---
 
 ## Tech Stack
@@ -151,3 +180,4 @@ specs/                 # approved specs
 
 - Pin Python version via UV with `uv python pin 3.12`
 - Add `[project.scripts]` entries in `pyproject.toml`
+

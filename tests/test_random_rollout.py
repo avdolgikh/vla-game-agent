@@ -19,6 +19,7 @@ VALID_ACTION_NAMES = [
     "move_down",
     "do",
     "place_table",
+    "make_wood_pickaxe",
 ]
 
 
@@ -218,13 +219,13 @@ class TestRandomRolloutOutputs:
             )
 
     def test_episode_json_actions_taken_valid_indices(self, tmp_path):
-        """Every entry in actions_taken must be an integer in range 0-6."""
+        """Every entry in actions_taken must be an integer in range 0-7."""
         output_dir = run_rollout(tmp_path, max_steps=5)
         with open(output_dir / "episode.json") as f:
             data = json.load(f)
         for i, action in enumerate(data["actions_taken"]):
             assert isinstance(action, int), f"actions_taken[{i}] must be an int, got {type(action)}"
-            assert 0 <= action <= 6, f"actions_taken[{i}] = {action} is out of valid range 0-6"
+            assert 0 <= action <= 7, f"actions_taken[{i}] = {action} is out of valid range 0-7"
 
     def test_episode_json_total_reward_is_numeric(self, tmp_path):
         """episode.json['total_reward'] must be a number (int or float)."""

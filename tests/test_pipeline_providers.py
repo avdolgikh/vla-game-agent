@@ -27,7 +27,6 @@ def test_codex_provider_uses_windows_cmd_shim(tmp_path: Path):
     provider = CodexProvider()
     command = provider._command(
         role="implementer",
-        prompt="Implement code",
         repo_root=tmp_path,
         output_path=tmp_path / "out.txt",
         schema_path=tmp_path / "schema.json",
@@ -42,7 +41,7 @@ def test_codex_provider_uses_windows_cmd_shim(tmp_path: Path):
     assert command[command.index("--model") + 1] == "gpt-5.1-codex"
     assert command[command.index("--output-schema") + 1].endswith("schema.json")
     assert command[command.index("--sandbox") + 1] == "danger-full-access"
-    assert command[-1] == "Implement code"
+    assert command[-1] == "-"
     assert "--ask-for-approval" not in command
 
 
@@ -50,7 +49,6 @@ def test_codex_reviewer_uses_danger_full_access_with_immutability_guard(tmp_path
     provider = CodexProvider()
     command = provider._command(
         role="reviewer",
-        prompt="Review code",
         repo_root=tmp_path,
         output_path=tmp_path / "out.txt",
         schema_path=tmp_path / "schema.json",
@@ -98,6 +96,7 @@ def test_codex_provider_reads_last_message_from_workspace_scratch(tmp_path: Path
         "text": True,
         "encoding": "utf-8",
         "errors": "replace",
+        "input": "Implement code",
     }
 
 

@@ -133,8 +133,19 @@ class PipelineLogger:
         self.log_file = log_file
         self.log_file.parent.mkdir(parents=True, exist_ok=True)
 
+    def _write_stdout(self, message: str) -> None:
+        stream = sys.stdout
+        line = f"{message}\n"
+        buffer = getattr(stream, "buffer", None)
+        if buffer is not None:
+            encoding = stream.encoding or "utf-8"
+            buffer.write(line.encode(encoding, errors="replace"))
+            buffer.flush()
+            return
+        stream.write(line)
+
     def log(self, message: str = "") -> None:
-        print(message)
+        self._write_stdout(message)
         with self.log_file.open("a", encoding="utf-8") as handle:
             handle.write(message)
             handle.write("\n")
@@ -322,7 +333,7 @@ class PipelineRunner:
         repo_root: Path,
         task: str,
         provider: Provider,
-        max_revisions: int = 2,
+        max_revisions: int = 4,
     ) -> None:
         self.repo_root = repo_root
         self.task = task
@@ -846,7 +857,7 @@ class PipelineRunner:
         return EXIT_SUCCESS
 
 
-def run_from_cli(task: str, provider: Provider, repo_root: Path, max_revisions: int = 2) -> int:
+def run_from_cli(task: str, provider: Provider, repo_root: Path, max_revisions: int = 4) -> int:
     """CLI entry point helper."""
 
     runner = PipelineRunner(
