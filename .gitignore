@@ -12,3 +12,4 @@ artifacts/
 .env
 .claude/settings.local.json
 .pipeline-state/
+mlruns/

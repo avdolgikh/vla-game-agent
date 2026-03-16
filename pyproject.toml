@@ -8,6 +8,7 @@ dependencies = [
     "gymnasium>=0.29",
     "numpy>=1.24",
     "imageio[ffmpeg,pyav]>=2.31",
+    "mlflow>=3.10.1",
 ]
 
 [project.optional-dependencies]

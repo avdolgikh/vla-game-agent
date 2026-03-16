@@ -387,6 +387,19 @@ class TestActionCounts:
         ds = TrajectoryDataset(data_dirs=[str(policy_dir)])
         assert (ds.action_counts() >= 0).all()
 
+    def test_action_counts_integer_dtype(self, tmp_path):
+        """action_counts() must return an integer-type ndarray."""
+        from vla_agent.data import TrajectoryDataset
+
+        policy_dir = _make_policy_dir(
+            tmp_path, "collect_wood", num_episodes=2, steps_per_episode=[8, 12]
+        )
+        ds = TrajectoryDataset(data_dirs=[str(policy_dir)])
+        counts = ds.action_counts()
+        assert counts.dtype.kind in {"i", "u"}, (
+            f"Expected integer dtype for action_counts(), got {counts.dtype}"
+        )
+
     def test_action_counts_correct_values(self, tmp_path):
         """action_counts() must match the known distribution of a synthetic episode."""
         from vla_agent.data import TrajectoryDataset
@@ -484,18 +497,33 @@ class TestTrainValSplit:
         """No frame index from a train episode should appear in the val set, and vice versa."""
         from vla_agent.data import TrajectoryDataset, train_val_split
 
-        # Use episodes with distinct step counts to identify episode membership by index range
-        steps = [5, 7, 3, 8, 6, 4, 9, 2, 10, 5]  # 10 episodes
-        policy_dir = _make_policy_dir(
-            tmp_path, "collect_wood", num_episodes=10, steps_per_episode=steps
-        )
-        ds = TrajectoryDataset(data_dirs=[str(policy_dir)])
+        # Build multiple directories with known episode lengths
+        directory_configs = [
+            ("collect_wood", [5, 7, 3]),
+            ("place_table", [8, 6]),
+            ("collect_stone", [4, 9]),
+        ]
+
+        data_dirs = []
+        all_steps = []
+        for idx, (policy_name, steps_list) in enumerate(directory_configs):
+            dir_path = _make_policy_dir(
+                tmp_path / f"dir_{idx}",
+                policy_name,
+                num_episodes=len(steps_list),
+                steps_per_episode=steps_list,
+                seed=idx,
+            )
+            data_dirs.append(str(dir_path))
+            all_steps.extend(steps_list)
+
+        ds = TrajectoryDataset(data_dirs=data_dirs)
         train_sub, val_sub = train_val_split(ds, val_fraction=0.3, seed=42)
 
         # Reconstruct which global indices belong to each episode
         episode_index_ranges = []
         start = 0
-        for s in steps:
+        for s in all_steps:
             episode_index_ranges.append(set(range(start, start + s)))
             start += s
 

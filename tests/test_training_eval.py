@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 import subprocess
 import tempfile
+import os
+import shutil
+import uuid
 from pathlib import Path
 
 import numpy as np
@@ -30,10 +33,21 @@ def _make_episode_npz(
     filename: str,
     num_steps: int,
     rng: np.random.Generator,
+    *,
+    action_signal: bool = False,
 ) -> None:
     """Write a synthetic episode .npz file."""
-    observations = rng.integers(0, 256, size=(num_steps + 1, 64, 64, 3), dtype=np.uint8)
-    actions = rng.integers(0, NUM_ACTIONS, size=(num_steps,), dtype=np.int32)
+    if action_signal:
+        actions = np.arange(num_steps, dtype=np.int32) % NUM_ACTIONS
+        observations = np.empty((num_steps + 1, 64, 64, 3), dtype=np.uint8)
+        for step, action in enumerate(actions):
+            intensity = (action * 32) % 256
+            noise = rng.integers(0, 16, size=(64, 64, 3), dtype=np.int32)
+            observations[step] = np.clip(intensity + noise, 0, 255).astype(np.uint8)
+        observations[-1] = np.zeros((64, 64, 3), dtype=np.uint8)
+    else:
+        observations = rng.integers(0, 256, size=(num_steps + 1, 64, 64, 3), dtype=np.uint8)
+        actions = rng.integers(0, NUM_ACTIONS, size=(num_steps,), dtype=np.int32)
     rewards = rng.random(num_steps).astype(np.float32)
     np.savez(
         str(policy_dir / filename), observations=observations, actions=actions, rewards=rewards
@@ -46,6 +60,8 @@ def _make_policy_dir(
     num_episodes: int = SMALL_NUM_EPISODES,
     num_steps: int = SMALL_STEPS_PER_EPISODE,
     seed: int = 0,
+    *,
+    action_signal: bool = False,
 ) -> Path:
     """Create a directory with synthetic trajectory data and a manifest.json."""
     rng = np.random.default_rng(seed)
@@ -55,7 +71,9 @@ def _make_policy_dir(
     episodes_meta = []
     for i in range(num_episodes):
         filename = f"episode_{i:03d}.npz"
-        _make_episode_npz(policy_dir, filename, num_steps, rng)
+        _make_episode_npz(
+            policy_dir, filename, num_steps, rng, action_signal=action_signal
+        )
         episodes_meta.append(
             {
                 "file": filename,
@@ -116,6 +134,42 @@ def _run_train(
     return subprocess.run(cmd, cwd=str(REPO_ROOT), capture_output=True, text=True)
 
 
+def _run_train_mlflow(
+    data_dirs: list[Path],
+    output_dir: Path,
+    *,
+    epochs: int = 2,
+    seed: int = 42,
+    extra_args: list[str] | None = None,
+) -> subprocess.CompletedProcess:
+    """Run train_imitation.py with MLflow enabled and return the CompletedProcess."""
+    cmd = [
+        "uv",
+        "run",
+        "python",
+        str(TRAIN_SCRIPT),
+        "--data-dirs",
+        *[str(d) for d in data_dirs],
+        "--output-dir",
+        str(output_dir),
+        "--epochs",
+        str(epochs),
+        "--batch-size",
+        "8",
+        "--lr",
+        "1e-3",
+        "--val-fraction",
+        "0.3",
+        "--seed",
+        str(seed),
+        "--device",
+        "cpu",
+    ]
+    if extra_args:
+        cmd.extend(extra_args)
+    return subprocess.run(cmd, cwd=str(REPO_ROOT), capture_output=True, text=True)
+
+
 def _run_eval(
     model_path: Path,
     output_dir: Path,
@@ -145,6 +199,48 @@ def _run_eval(
         cmd.extend(extra_args)
     return subprocess.run(cmd, cwd=str(REPO_ROOT), capture_output=True, text=True)
 
+
+# ---------------------------------------------------------------------------
+# MLflow helper utilities
+# ---------------------------------------------------------------------------
+
+def _snapshot_mlruns() -> tuple[Path, bool, set[str]]:
+    """Snapshot mlruns/ state so tests can clean up after themselves."""
+    mlruns_dir = REPO_ROOT / "mlruns"
+    existed_before = mlruns_dir.exists()
+    existing_names = {entry.name for entry in mlruns_dir.iterdir()} if existed_before else set()
+    return mlruns_dir, existed_before, existing_names
+
+
+def _mlruns_new_entries(snapshot: tuple[Path, bool, set[str]]) -> set[str]:
+    mlruns_dir, _, existing_names = snapshot
+    if not mlruns_dir.exists():
+        return set()
+    return {entry.name for entry in mlruns_dir.iterdir()} - existing_names
+
+
+def _cleanup_mlruns(snapshot: tuple[Path, bool, set[str]]) -> None:
+    mlruns_dir, existed_before, existing_names = snapshot
+    if not mlruns_dir.exists():
+        return
+    for entry in list(mlruns_dir.iterdir()):
+        if entry.name in existing_names:
+            continue
+        if entry.is_dir():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
+    if not existed_before and not any(mlruns_dir.iterdir()):
+        mlruns_dir.rmdir()
+
+
+def _require_mlflow():
+    """Fail fast if MLflow is unavailable for the integration tests."""
+    try:
+        import mlflow
+    except ImportError as exc:
+        pytest.fail("mlflow must be installed to run MLflow tracking tests", pytrace=False)
+    return mlflow
 
 # ---------------------------------------------------------------------------
 # Static checks (no subprocess needed)
@@ -301,9 +397,43 @@ class TestTrainingEndToEnd:
 
         log = json.loads((out_dir / "train_log.json").read_text())
         config = log["config"]
-        required_config_keys = {"epochs", "batch_size", "lr", "val_fraction", "seed", "device"}
+        required_config_keys = {
+            "epochs",
+            "batch_size",
+            "lr",
+            "val_fraction",
+            "seed",
+            "device",
+            "data_dirs",
+            "num_train_samples",
+            "num_val_samples",
+            "num_parameters",
+        }
         missing = required_config_keys - set(config.keys())
         assert not missing, f"train_log.json config is missing fields: {missing}"
+
+    def test_class_weights_flag_records_weights(self, tmp_path):
+        """Passing --class-weights must be recorded in train_log.json config."""
+        data_dirs = [
+            _make_policy_dir(tmp_path / "data", "collect_wood", seed=0),
+            _make_policy_dir(tmp_path / "data", "place_table", seed=1),
+        ]
+        out_dir = tmp_path / "model_out"
+        result = _run_train(
+            data_dirs,
+            out_dir,
+            epochs=2,
+            extra_args=["--class-weights"],
+        )
+        assert result.returncode == 0, f"Training failed:\n{result.stderr}"
+
+        log = json.loads((out_dir / "train_log.json").read_text())
+        config = log["config"]
+        assert "class_weights" in config, "class_weights must be present in train_log config"
+        value = config["class_weights"]
+        assert value not in (None, False), (
+            "class_weights flag was provided but train_log.json reports it as disabled"
+        )
 
     def test_best_model_pt_is_loadable(self, tmp_path):
         """best_model.pt must be loadable by CrafterCNN."""
@@ -341,98 +471,85 @@ class TestMLflowTracking:
 
     def test_mlflow_experiment_created(self, tmp_path):
         """After training with MLflow enabled, an experiment directory must exist in mlruns/."""
+        mlflow = _require_mlflow()
+
         data_dirs = [_make_policy_dir(tmp_path / "data", "collect_wood", seed=0)]
         out_dir = tmp_path / "model_out"
-        mlruns_dir = tmp_path / "mlruns"
+        snapshot = _snapshot_mlruns()
+        mlruns_dir, _, _ = snapshot
+        experiment_name = f"mvp1_test_{uuid.uuid4().hex[:8]}"
 
-        cmd = [
-            "uv",
-            "run",
-            "python",
-            str(TRAIN_SCRIPT),
-            "--data-dirs",
-            str(data_dirs[0]),
-            "--output-dir",
-            str(out_dir),
-            "--epochs",
-            "2",
-            "--batch-size",
-            "8",
-            "--lr",
-            "1e-3",
-            "--val-fraction",
-            "0.3",
-            "--seed",
-            "42",
-            "--device",
-            "cpu",
-            "--experiment-name",
-            "mvp1_test",
-        ]
-        result = subprocess.run(
-            cmd,
-            cwd=str(tmp_path),  # run in tmp_path so mlruns/ is created there
-            capture_output=True,
-            text=True,
-        )
-        assert result.returncode == 0, (
-            f"Training with MLflow failed.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-        )
-        assert mlruns_dir.exists(), (
-            f"Expected mlruns/ directory at {mlruns_dir} after training with MLflow"
-        )
+        try:
+            result = _run_train_mlflow(
+                data_dirs,
+                out_dir,
+                epochs=2,
+                extra_args=["--experiment-name", experiment_name],
+            )
+            assert result.returncode == 0, (
+                f"Training with MLflow failed.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+            )
+            assert mlruns_dir.exists(), (
+                f"Expected mlruns/ directory at {mlruns_dir} after training with MLflow"
+            )
+            new_entries = _mlruns_new_entries(snapshot)
+            assert new_entries, "mlruns/ must contain new experiment data after training"
+            mlflow.set_tracking_uri(str(mlruns_dir))
+            experiment = mlflow.get_experiment_by_name(experiment_name)
+            assert experiment is not None, f"MLflow experiment '{experiment_name}' must exist"
+        finally:
+            _cleanup_mlruns(snapshot)
 
     def test_mlflow_run_directory_created(self, tmp_path):
         """After training, mlruns/ must contain at least one run directory."""
+        mlflow = _require_mlflow()
+
         data_dirs = [_make_policy_dir(tmp_path / "data", "collect_wood", seed=0)]
         out_dir = tmp_path / "model_out"
+        snapshot = _snapshot_mlruns()
+        mlruns_dir, _, _ = snapshot
+        experiment_name = f"mvp1_run_test_{uuid.uuid4().hex[:8]}"
 
-        cmd = [
-            "uv",
-            "run",
-            "python",
-            str(TRAIN_SCRIPT),
-            "--data-dirs",
-            str(data_dirs[0]),
-            "--output-dir",
-            str(out_dir),
-            "--epochs",
-            "2",
-            "--batch-size",
-            "8",
-            "--lr",
-            "1e-3",
-            "--val-fraction",
-            "0.3",
-            "--seed",
-            "42",
-            "--device",
-            "cpu",
-            "--experiment-name",
-            "mvp1_test",
-        ]
-        result = subprocess.run(cmd, cwd=str(tmp_path), capture_output=True, text=True)
-        assert result.returncode == 0, (
-            f"Training with MLflow failed.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-        )
-
-        mlruns_dir = tmp_path / "mlruns"
-        # mlruns should contain subdirectories (experiment and run directories)
-        subdirs = list(mlruns_dir.rglob("*"))
-        assert len(subdirs) > 0, "mlruns/ must contain run artifacts after training"
+        try:
+            result = _run_train_mlflow(
+                data_dirs,
+                out_dir,
+                epochs=2,
+                extra_args=["--experiment-name", experiment_name],
+            )
+            assert result.returncode == 0, (
+                f"Training with MLflow failed.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+            )
+            new_entries = _mlruns_new_entries(snapshot)
+            assert new_entries, "mlruns/ must contain run artifacts after training"
+            mlflow.set_tracking_uri(str(mlruns_dir))
+            experiment = mlflow.get_experiment_by_name(experiment_name)
+            assert experiment is not None, f"Experiment '{experiment_name}' must exist"
+            runs = mlflow.search_runs(experiment_ids=[experiment.experiment_id])
+            assert len(runs) >= 1, "mlruns/ must contain at least one run after training"
+        finally:
+            _cleanup_mlruns(snapshot)
 
     def test_no_mlflow_flag_skips_mlruns(self, tmp_path):
         """With --no-mlflow, no mlruns/ directory should be created."""
         data_dirs = [_make_policy_dir(tmp_path / "data", "collect_wood", seed=0)]
         out_dir = tmp_path / "model_out"
-        mlruns_dir = tmp_path / "mlruns"
+        snapshot = _snapshot_mlruns()
+        mlruns_dir, existed_before, _ = snapshot
 
-        result = _run_train(data_dirs, out_dir, epochs=2)
-        # _run_train already passes --no-mlflow, and runs from REPO_ROOT
-        # We verify here that the flag doesn't break anything
-        assert result.returncode == 0, (
-            f"Training with --no-mlflow failed.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-        )
+        try:
+            result = _run_train(data_dirs, out_dir, epochs=2)
+            # _run_train already passes --no-mlflow, and runs from REPO_ROOT
+            # We verify here that the flag doesn't break anything
+            assert result.returncode == 0, (
+                f"Training with --no-mlflow failed.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+            )
+            new_entries = _mlruns_new_entries(snapshot)
+            assert not new_entries, "mlruns/ should not be created when --no-mlflow is passed"
+            if not existed_before:
+                assert not mlruns_dir.exists(), "mlruns/ should not be created when --no-mlflow is passed"
+        finally:
+            _cleanup_mlruns(snapshot)
 
     def test_no_mlflow_flag_still_creates_file_artifacts(self, tmp_path):
         """With --no-mlflow, file artifacts (best_model.pt etc.) must still be created."""
@@ -447,166 +564,163 @@ class TestMLflowTracking:
 
     def test_mlflow_per_epoch_metrics_count(self, tmp_path):
         """MLflow run must have train_loss, val_loss, val_acc metrics with one entry per epoch."""
-        try:
-            import mlflow
-        except ImportError:
-            pytest.skip("mlflow not installed")
+        mlflow = _require_mlflow()
 
         data_dirs = [_make_policy_dir(tmp_path / "data", "collect_wood", seed=0)]
         out_dir = tmp_path / "model_out"
         n_epochs = 3
+        snapshot = _snapshot_mlruns()
+        mlruns_dir, _, _ = snapshot
+        experiment_name = f"mvp1_metrics_test_{uuid.uuid4().hex[:8]}"
 
-        cmd = [
-            "uv",
-            "run",
-            "python",
-            str(TRAIN_SCRIPT),
-            "--data-dirs",
-            str(data_dirs[0]),
-            "--output-dir",
-            str(out_dir),
-            "--epochs",
-            str(n_epochs),
-            "--batch-size",
-            "8",
-            "--lr",
-            "1e-3",
-            "--val-fraction",
-            "0.3",
-            "--seed",
-            "42",
-            "--device",
-            "cpu",
-            "--experiment-name",
-            "mvp1_metrics_test",
-        ]
-        result = subprocess.run(cmd, cwd=str(tmp_path), capture_output=True, text=True)
-        assert result.returncode == 0, (
-            f"Training failed.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-        )
-
-        mlflow.set_tracking_uri(str(tmp_path / "mlruns"))
-        experiment = mlflow.get_experiment_by_name("mvp1_metrics_test")
-        assert experiment is not None, "MLflow experiment 'mvp1_metrics_test' must exist"
-
-        runs = mlflow.search_runs(experiment_ids=[experiment.experiment_id])
-        assert len(runs) >= 1, "At least one MLflow run must exist"
-
-        run_id = runs.iloc[0]["run_id"]
-        client = mlflow.tracking.MlflowClient(tracking_uri=str(tmp_path / "mlruns"))
-
-        for metric_name in ("train_loss", "val_loss", "val_acc"):
-            history = client.get_metric_history(run_id, metric_name)
-            assert len(history) == n_epochs, (
-                f"Expected {n_epochs} entries for metric '{metric_name}', got {len(history)}"
+        try:
+            result = _run_train_mlflow(
+                data_dirs,
+                out_dir,
+                epochs=n_epochs,
+                extra_args=["--experiment-name", experiment_name],
             )
+            assert result.returncode == 0, (
+                f"Training failed.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+            )
+            mlflow.set_tracking_uri(str(mlruns_dir))
+            experiment = mlflow.get_experiment_by_name(experiment_name)
+            assert experiment is not None, f"MLflow experiment '{experiment_name}' must exist"
+
+            runs = mlflow.search_runs(experiment_ids=[experiment.experiment_id])
+            assert len(runs) >= 1, "At least one MLflow run must exist"
+
+            run_id = runs.iloc[0]["run_id"]
+            client = mlflow.tracking.MlflowClient(tracking_uri=str(mlruns_dir))
+
+            for metric_name in ("train_loss", "val_loss", "val_acc"):
+                history = client.get_metric_history(run_id, metric_name)
+                assert len(history) == n_epochs, (
+                    f"Expected {n_epochs} entries for metric '{metric_name}', got {len(history)}"
+                )
+        finally:
+            _cleanup_mlruns(snapshot)
 
     def test_mlflow_params_logged(self, tmp_path):
         """MLflow run must have hyperparameters logged as params."""
-        try:
-            import mlflow
-        except ImportError:
-            pytest.skip("mlflow not installed")
+        mlflow = _require_mlflow()
 
         data_dirs = [_make_policy_dir(tmp_path / "data", "collect_wood", seed=0)]
         out_dir = tmp_path / "model_out"
+        snapshot = _snapshot_mlruns()
+        mlruns_dir, _, _ = snapshot
+        experiment_name = f"mvp1_params_test_{uuid.uuid4().hex[:8]}"
 
-        cmd = [
-            "uv",
-            "run",
-            "python",
-            str(TRAIN_SCRIPT),
-            "--data-dirs",
-            str(data_dirs[0]),
-            "--output-dir",
-            str(out_dir),
-            "--epochs",
-            "2",
-            "--batch-size",
-            "8",
-            "--lr",
-            "1e-3",
-            "--val-fraction",
-            "0.3",
-            "--seed",
-            "42",
-            "--device",
-            "cpu",
-            "--experiment-name",
-            "mvp1_params_test",
-        ]
-        result = subprocess.run(cmd, cwd=str(tmp_path), capture_output=True, text=True)
-        assert result.returncode == 0, (
-            f"Training failed.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-        )
+        try:
+            result = _run_train_mlflow(
+                data_dirs,
+                out_dir,
+                extra_args=["--experiment-name", experiment_name],
+            )
+            assert result.returncode == 0, (
+                f"Training failed.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+            )
 
-        mlflow.set_tracking_uri(str(tmp_path / "mlruns"))
-        experiment = mlflow.get_experiment_by_name("mvp1_params_test")
-        assert experiment is not None
+            mlflow.set_tracking_uri(str(mlruns_dir))
+            experiment = mlflow.get_experiment_by_name(experiment_name)
+            assert experiment is not None
 
-        runs = mlflow.search_runs(experiment_ids=[experiment.experiment_id])
-        assert len(runs) >= 1
-        run_id = runs.iloc[0]["run_id"]
+            runs = mlflow.search_runs(experiment_ids=[experiment.experiment_id])
+            assert len(runs) >= 1
+            run_id = runs.iloc[0]["run_id"]
 
-        client = mlflow.tracking.MlflowClient(tracking_uri=str(tmp_path / "mlruns"))
-        run_data = client.get_run(run_id).data
+            client = mlflow.tracking.MlflowClient(tracking_uri=str(mlruns_dir))
+            run_data = client.get_run(run_id).data
 
-        required_params = {"epochs", "batch_size", "lr", "val_fraction", "seed", "device"}
-        logged_params = set(run_data.params.keys())
-        missing = required_params - logged_params
-        assert not missing, f"MLflow run is missing params: {missing}"
+            required_params = {
+                "epochs",
+                "batch_size",
+                "lr",
+                "val_fraction",
+                "seed",
+                "device",
+                "class_weights",
+                "num_train_samples",
+                "num_val_samples",
+                "num_parameters",
+                "data_dirs",
+            }
+            logged_params = set(run_data.params.keys())
+            missing = required_params - logged_params
+            assert not missing, f"MLflow run is missing params: {missing}"
+        finally:
+            _cleanup_mlruns(snapshot)
 
     def test_mlflow_best_val_acc_logged(self, tmp_path):
         """MLflow run must have best_val_acc logged as a final metric."""
-        try:
-            import mlflow
-        except ImportError:
-            pytest.skip("mlflow not installed")
+        mlflow = _require_mlflow()
 
         data_dirs = [_make_policy_dir(tmp_path / "data", "collect_wood", seed=0)]
         out_dir = tmp_path / "model_out"
+        snapshot = _snapshot_mlruns()
+        mlruns_dir, _, _ = snapshot
+        experiment_name = f"mvp1_best_acc_test_{uuid.uuid4().hex[:8]}"
 
-        cmd = [
-            "uv",
-            "run",
-            "python",
-            str(TRAIN_SCRIPT),
-            "--data-dirs",
-            str(data_dirs[0]),
-            "--output-dir",
-            str(out_dir),
-            "--epochs",
-            "2",
-            "--batch-size",
-            "8",
-            "--lr",
-            "1e-3",
-            "--val-fraction",
-            "0.3",
-            "--seed",
-            "42",
-            "--device",
-            "cpu",
-            "--experiment-name",
-            "mvp1_best_acc_test",
-        ]
-        result = subprocess.run(cmd, cwd=str(tmp_path), capture_output=True, text=True)
-        assert result.returncode == 0, (
-            f"Training failed.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-        )
+        try:
+            result = _run_train_mlflow(
+                data_dirs,
+                out_dir,
+                extra_args=["--experiment-name", experiment_name],
+            )
+            assert result.returncode == 0, (
+                f"Training failed.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+            )
 
-        mlflow.set_tracking_uri(str(tmp_path / "mlruns"))
-        experiment = mlflow.get_experiment_by_name("mvp1_best_acc_test")
-        assert experiment is not None
+            mlflow.set_tracking_uri(str(mlruns_dir))
+            experiment = mlflow.get_experiment_by_name(experiment_name)
+            assert experiment is not None, f"MLflow experiment '{experiment_name}' must exist"
 
-        runs = mlflow.search_runs(experiment_ids=[experiment.experiment_id])
-        run_id = runs.iloc[0]["run_id"]
+            runs = mlflow.search_runs(experiment_ids=[experiment.experiment_id])
+            run_id = runs.iloc[0]["run_id"]
 
-        client = mlflow.tracking.MlflowClient(tracking_uri=str(tmp_path / "mlruns"))
-        run_data = client.get_run(run_id).data
+            client = mlflow.tracking.MlflowClient(tracking_uri=str(mlruns_dir))
+            run_data = client.get_run(run_id).data
 
-        assert "best_val_acc" in run_data.metrics, "best_val_acc must be logged as a final metric"
-        assert "best_epoch" in run_data.metrics, "best_epoch must be logged as a final metric"
+            assert "best_val_acc" in run_data.metrics, "best_val_acc must be logged as a final metric"
+            assert "best_epoch" in run_data.metrics, "best_epoch must be logged as a final metric"
+        finally:
+            _cleanup_mlruns(snapshot)
+
+    def test_mlflow_artifacts_logged(self, tmp_path):
+        """MLflow run must store best_model.pt, final_model.pt, and train_log.json as artifacts."""
+        mlflow = _require_mlflow()
+
+        data_dirs = [_make_policy_dir(tmp_path / "data", "collect_wood", seed=0)]
+        out_dir = tmp_path / "model_out"
+        snapshot = _snapshot_mlruns()
+        mlruns_dir, _, _ = snapshot
+        experiment_name = f"mvp1_artifacts_test_{uuid.uuid4().hex[:8]}"
+
+        try:
+            result = _run_train_mlflow(
+                data_dirs,
+                out_dir,
+                extra_args=["--experiment-name", experiment_name],
+            )
+            assert result.returncode == 0, (
+                f"Training failed.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+            )
+
+            mlflow.set_tracking_uri(str(mlruns_dir))
+            experiment = mlflow.get_experiment_by_name(experiment_name)
+            assert experiment is not None, f"MLflow experiment '{experiment_name}' must exist"
+
+            runs = mlflow.search_runs(experiment_ids=[experiment.experiment_id])
+            assert len(runs) >= 1, "Expected at least one MLflow run"
+            run_id = runs.iloc[0]["run_id"]
+
+            client = mlflow.tracking.MlflowClient(tracking_uri=str(mlruns_dir))
+            artifacts = {artifact.path for artifact in client.list_artifacts(run_id)}
+            expected = {"best_model.pt", "final_model.pt", "train_log.json"}
+            missing = expected - artifacts
+            assert not missing, f"MLflow run missing artifacts: {missing}"
+        finally:
+            _cleanup_mlruns(snapshot)
 
 
 # ---------------------------------------------------------------------------
@@ -800,11 +914,16 @@ class TestTrainingUsefulModel:
             f"best_val_acc={best_val_acc:.4f} is 0, model is not learning at all"
         )
 
-    def test_best_val_acc_ge_first_epoch_acc(self, tmp_path):
-        """best_val_acc must be >= val_acc of the first epoch (best tracking works)."""
+    def test_best_val_acc_gt_first_epoch_acc(self, tmp_path):
+        """best_val_acc must be > val_acc of the first epoch (model must improve)."""
         data_dirs = [
             _make_policy_dir(
-                tmp_path / "data", "collect_wood", num_episodes=5, num_steps=20, seed=0
+                tmp_path / "data",
+                "collect_wood",
+                num_episodes=5,
+                num_steps=20,
+                seed=0,
+                action_signal=True,
             ),
         ]
         out_dir = tmp_path / "model_out"
@@ -814,8 +933,9 @@ class TestTrainingUsefulModel:
         log = json.loads((out_dir / "train_log.json").read_text())
         first_epoch_acc = log["epochs"][0]["val_acc"]
         best_val_acc = log["best_val_acc"]
-        assert best_val_acc >= first_epoch_acc, (
-            f"best_val_acc ({best_val_acc:.4f}) < first epoch val_acc ({first_epoch_acc:.4f})"
+        assert best_val_acc > first_epoch_acc, (
+            f"best_val_acc ({best_val_acc:.4f}) is not greater than first epoch val_acc "
+            f"({first_epoch_acc:.4f})"
         )
 
     @pytest.mark.slow
