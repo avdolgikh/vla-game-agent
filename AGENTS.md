@@ -35,6 +35,10 @@ Document every significant decision here as it happens.
 - **2026-03-13**: On Windows, Codex provider prompts must be sent via stdin (codex exec -) rather than as a positional CLI argument to avoid command-line length failures on large embedded specs/prompts.
 - **2026-03-13**: Pipeline logging on this Windows console must tolerate non-ASCII provider output by writing to stdout with encoding replacement instead of raw print(), while preserving UTF-8 transcripts on disk.
 - **2026-03-13**: Repo rule added: preserve existing document encoding and visible typography in specs/docs unless the user explicitly requests formatting or character-set changes.
+- **2026-03-15**: Trajectory collection is split into two phases. Phase 1 (MVP-0b): 10 episodes per policy to validate the pipeline end-to-end. Phase 2 (MVP-1): 100–500 episodes per policy to produce the actual training dataset. MVP-0b's deliverable is working infrastructure, not training-scale data.
+- **2026-03-15**: Milestone progression follows deliberate capability layering. MVP-1 is a vision-only baseline (frame → CNN → action, no text input) trained on all 3 policies mixed — it intentionally cannot distinguish tasks. MVP-2 adds instruction conditioning (frame + text → action), making it a true VLA. The gap in success rates between MVP-1 and MVP-2 is the project's core result: language grounding matters for goal-directed behavior.
+- **2026-03-15**: MLflow experiment tracking is in-scope for MVP-1. Local file-based backend (`mlruns/`), no server. Integrated into the training script with a `--no-mlflow` escape hatch for tests. Rationale: MVP-1 is the first training loop — tracking from the start avoids retrofitting and enables clean MVP-1 vs MVP-2 comparison.
+- **2026-03-15**: MVP-1 spec approved (`specs/mvp-1-spec.md`). 11 acceptance criteria. Next pipeline step: write tests.
 
 ---
 
@@ -44,8 +48,8 @@ Document every significant decision here as it happens.
 |-----------|-------------|--------|
 | MVP-0a | Env wrapper + random rollout | **Done** (84 tests, all passing) |
 | MVP-0b | Scripted policies + trajectory data | **Done** (104 tests, all passing) |
-| MVP-1 | Vision-only imitation baseline | Planned |
-| MVP-2 | Instruction-conditioned policy | Planned |
+| MVP-1 | Vision-only imitation baseline ("V" only — no text) | **Spec approved** — next: tests |
+| MVP-2 | Instruction-conditioned VLA policy ("V+L→A") | Planned |
 | MVP-3 | Portfolio polish | Planned |
 
 ### MVP-0a Deliverables
@@ -78,7 +82,7 @@ uv run python scripts/collect_trajectories.py --policy collect_stone --num-episo
 # Outputs: artifacts/trajectories/<policy>/manifest.json + episode_NNN.npz files
 ```
 
-**Status:** Code is implemented and tests pass (104). Trajectory data has NOT been collected yet. Next step: run the three commands above, verify outputs, then commit and move to MVP-1.
+**Status:** Done. Code implemented (104 tests passing), validation trajectories collected (10 episodes per policy, 100% success). Ready for MVP-1.
 
 ---
 
