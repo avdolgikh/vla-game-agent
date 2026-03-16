@@ -6,8 +6,33 @@ All agents (test-writer, implementer, reviewer) inherit these rules automaticall
 
 ## Project
 
-**vla-game-agent** - A tiny instruction-conditioned vision-to-action agent for Crafter.
-VLA-style game bot: takes a game frame + a text instruction -> predicts a player action.
+**vla-game-agent** — An instruction-conditioned vision-to-action agent for Crafter.
+VLA-style game bot: takes a game frame + a text instruction → predicts a player action.
+
+### Why VLA, Not RL
+
+Reinforcement learning answers "maximize this reward signal." It needs per-task reward functions, millions of environment interactions, and produces policies that can't be redirected with natural language. VLA (Vision-Language-Action) answers "given what you see and what I told you, what should you do?" One model handles many tasks, steered by language instructions. This is the paradigm shift from "one policy per task" to "one model that follows instructions."
+
+The project demonstrates this shift in a clean, minimal setting. The core result is the gap between MVP-1 (vision-only, no instructions → collapses to one behavior) and MVP-2 (vision + language → task-specific behavior). That gap quantifies the value of language grounding for goal-directed behavior.
+
+### Why Pretrained Components
+
+Training vision and language representations from scratch on ~500 episodes (~33K samples) is infeasible. Pretrained encoders solve this: a frozen vision encoder provides visual understanding, a frozen text encoder provides language understanding, and only a small trainable action head learns the (visual_features + text_features) → action mapping. The hard problems (seeing, reading) are already solved by pretraining on large datasets. This is the standard VLA paradigm (RT-2, Octo, OpenVLA in robotics), applied here to a game environment.
+
+### VLA Architecture (MVP-2)
+
+```
+Frame (64×64 RGB) → [Frozen Vision Encoder] → vision_features (e.g., 512-d)
+Instruction text  → [Frozen Text Encoder]   → text_features   (e.g., 512-d)
+
+concat(vision_features, text_features) → [Trainable MLP Action Head] → 8 action logits
+```
+
+Encoders are frozen — gradients only flow through the action head. This fits in 12 GB VRAM (RTX 4070) and is trainable on 500 episodes.
+
+### Practical Purpose
+
+Once trained, the VLA is controlled entirely through language. Same game frame, different instruction → different behavior. This applies beyond games: robotics ("pick up the red cup"), autonomous systems (LLM reasons in text, VLA executes physically), and any domain where you need one agent that follows diverse instructions without retraining per task.
 
 ## Architecture Decisions Log
 
@@ -41,6 +66,13 @@ Document every significant decision here as it happens.
 - **2026-03-15**: MVP-1 spec approved (`specs/mvp-1-spec.md`). 11 acceptance criteria. Next pipeline step: write tests.
 - **2026-03-16**: MVP-1 agentic TDD pipeline launched via Codex provider (`uv run python scripts/run_pipeline.py mvp-1 --provider codex`). Pipeline auto-executes: tests → test review → implement → validate → code review → done. State in `.pipeline-state/mvp-1.json`, transcript in `.pipeline-state/mvp-1.log`.
 - **2026-03-16**: MVP-1 pipeline completed. Post-pipeline review found 5 issues; all fixed. Added Rules #10–#12 (no monkey-patching, test tier separation, config consistency). Added `tests/conftest.py` to auto-skip integration/slow tests. Removed 60-line MLflow monkey-patch from `__init__.py`.
+- **2026-03-16**: MVP-1 training complete. Best val_acc=71.6% at epoch 8/20 (overfitting after epoch 8 — train loss kept dropping but val loss rose). AC-6 (>60% val_acc) passed.
+- **2026-03-16**: MVP-1 evaluation complete (50 episodes). Per-task success rates: collect_wood=8%, place_table=84%, collect_stone=10%. Model collapsed to place_table as dominant behavior — cannot distinguish tasks without instruction input. AC-8 (asymmetric success rates) confirmed. This is the motivating baseline for MVP-2: the gap between MVP-1 and MVP-2 measures the value of language grounding.
+- **2026-03-16**: MVP-1 qualitative assessment: demo videos show the model exhibits near-random movement with occasional accidental task completion. The scripted experts use full game state (world map, player position, material coordinates) for precise navigation; the CNN sees only a 64×64 frame with no memory and no game state access. The 84% place_table rate is misleading — in 300 steps of semi-random movement, the agent stumbles into the place_table action sequence because it overlaps with the dominant training signal. The model does not navigate or plan.
+- **2026-03-16**: VLA vs RL design rationale. RL answers "maximize this reward signal" — it needs per-task reward functions, millions of interactions, and produces policies that can't be redirected with language. VLA answers "given what you see and what I told you, what should you do?" — one model handles many tasks, steered by natural language instructions. Language becomes the universal interface for controlling agents. This is the paradigm shift from "one policy per task" to "one model that follows instructions." The project demonstrates this shift in a clean minimal setting.
+- **2026-03-16**: Training VLA from scratch is infeasible with our data scale (~33K samples, 500 episodes). Pretrained encoders are required: a frozen vision encoder (pretrained on large image datasets) provides visual understanding, a frozen text encoder (pretrained on large text corpora) provides language understanding, and only a small trainable action head learns the mapping (visual_features + text_features) → action logits. This is the standard VLA paradigm (RT-2, Octo, OpenVLA in robotics), applied to a game environment.
+- **2026-03-16**: MVP-2 VLA architecture: Frame (64×64) → [Frozen Vision Encoder] → vision_features; Instruction text → [Frozen Text Encoder] → text_features; concat(vision_features, text_features) → [Trainable MLP Action Head] → 8 action logits. Encoders are frozen — gradients only flow through the action head. This fits in 12 GB VRAM and is trainable on 500 episodes because the hard problems (seeing, reading) are solved by pretraining.
+- **2026-03-16**: Research spec created (`specs/vla-components-research-spec.md`) to identify pretrained open-source vision and text encoder components for MVP-2. Self-contained document that can be delegated to any AI. Key constraints: RTX 4070 (12 GB VRAM), PyTorch, ≤ ~1B total params, permissive license, HuggingFace/timm availability. CLIP-family models are natural candidates (shared vision+text embedding space).
 
 ---
 
@@ -50,8 +82,8 @@ Document every significant decision here as it happens.
 |-----------|-------------|--------|
 | MVP-0a | Env wrapper + random rollout | **Done** (84 tests, all passing) |
 | MVP-0b | Scripted policies + trajectory data | **Done** (104 tests, all passing) |
-| MVP-1 | Vision-only imitation baseline ("V" only — no text) | **Code done** — next: full training run |
-| MVP-2 | Instruction-conditioned VLA policy ("V+L→A") | Planned |
+| MVP-1 | Vision-only imitation baseline ("V" only — no text) | **Done** — val_acc=71.6%, asymmetric success (8%/84%/10%) |
+| MVP-2 | Instruction-conditioned VLA policy ("V+L→A") | Research phase — selecting pretrained components |
 | MVP-3 | Portfolio polish | Planned |
 
 ### MVP-0a Deliverables
@@ -119,7 +151,31 @@ uv run python scripts/evaluate_policy.py \
     --output-dir artifacts/eval/mvp1
 ```
 
-**Status:** Code implemented and reviewed (79 unit + 11 integration tests passing). Next: full 20-epoch training run + 50-episode evaluation to validate AC-6 (>60% val_acc) and AC-8 (asymmetric success rates).
+### MVP-1 Results
+
+- **Training:** 20 epochs, best val_acc=71.6% at epoch 8. Overfitting after epoch 8 (train loss ↓, val loss ↑). AC-6 (>60% val_acc) passed.
+- **Evaluation (50 episodes):**
+  - `collect_wood`: 4/50 (8.0%)
+  - `place_table`: 42/50 (84.0%)
+  - `collect_stone`: 5/50 (10.0%)
+- **Interpretation:** Model collapsed to `place_table` as dominant behavior. Without instruction input, it cannot distinguish tasks — it learned one mixed policy. AC-8 (asymmetric success rates) confirmed. This baseline motivates MVP-2: instruction conditioning should enable task-specific behavior.
+
+**Status:** Done. All 11 acceptance criteria met. Artifacts in `artifacts/models/mvp1/` and `artifacts/eval/mvp1/`.
+
+### MVP-1 Qualitative Assessment
+
+Demo videos (`artifacts/demo/`) show the model exhibits near-random movement with occasional accidental task completion. The scripted experts use full game state (world map, player position, material coordinates) for precise pathfinding and multi-step plans. The CNN model sees only a single 64×64 frame — no world map, no coordinates, no inventory, no memory. Each frame is an independent decision.
+
+The 84% place_table success rate is misleading: in 300 steps of semi-random movement, the agent stumbles into the place_table action sequence because those actions (move, chop, place) overlap with the dominant training signal. The model does not navigate or plan — it just replays the statistically dominant action pattern.
+
+This is the expected and intended result. MVP-1 exists to establish the baseline that MVP-2 improves upon.
+
+### MVP-2 Preparation
+
+- **Research spec**: `specs/vla-components-research-spec.md` — self-contained document for identifying pretrained open-source vision and text encoder components
+- **Key constraints**: RTX 4070 (12 GB VRAM), PyTorch, ≤ ~1B total params, permissive license, HuggingFace/timm availability
+- **Architecture**: Frozen vision encoder + frozen text encoder + trainable MLP action head (see VLA Architecture section above)
+- **Expected outcome**: Per-task success rates should rise across all 3 tasks when instructions are provided, proving that language grounding enables task-specific behavior
 
 ---
 
