@@ -40,6 +40,7 @@ Document every significant decision here as it happens.
 - **2026-03-15**: MLflow experiment tracking is in-scope for MVP-1. Local file-based backend (`mlruns/`), no server. Integrated into the training script with a `--no-mlflow` escape hatch for tests. Rationale: MVP-1 is the first training loop — tracking from the start avoids retrofitting and enables clean MVP-1 vs MVP-2 comparison.
 - **2026-03-15**: MVP-1 spec approved (`specs/mvp-1-spec.md`). 11 acceptance criteria. Next pipeline step: write tests.
 - **2026-03-16**: MVP-1 agentic TDD pipeline launched via Codex provider (`uv run python scripts/run_pipeline.py mvp-1 --provider codex`). Pipeline auto-executes: tests → test review → implement → validate → code review → done. State in `.pipeline-state/mvp-1.json`, transcript in `.pipeline-state/mvp-1.log`.
+- **2026-03-16**: MVP-1 pipeline completed. Post-pipeline review found 5 issues; all fixed. Added Rules #10–#12 (no monkey-patching, test tier separation, config consistency). Added `tests/conftest.py` to auto-skip integration/slow tests. Removed 60-line MLflow monkey-patch from `__init__.py`.
 
 ---
 
@@ -49,7 +50,7 @@ Document every significant decision here as it happens.
 |-----------|-------------|--------|
 | MVP-0a | Env wrapper + random rollout | **Done** (84 tests, all passing) |
 | MVP-0b | Scripted policies + trajectory data | **Done** (104 tests, all passing) |
-| MVP-1 | Vision-only imitation baseline ("V" only — no text) | **Pipeline running** (Codex provider, 2026-03-16) |
+| MVP-1 | Vision-only imitation baseline ("V" only — no text) | **Code done** — next: full training run |
 | MVP-2 | Instruction-conditioned VLA policy ("V+L→A") | Planned |
 | MVP-3 | Portfolio polish | Planned |
 
@@ -84,6 +85,41 @@ uv run python scripts/collect_trajectories.py --policy collect_stone --num-episo
 ```
 
 **Status:** Done. Code implemented (104 tests passing), validation trajectories collected (10 episodes per policy, 100% success). Ready for MVP-1.
+
+### MVP-1 Deliverables (spec: `specs/mvp-1-spec.md`)
+
+- `src/vla_agent/data.py` - `TrajectoryDataset` (loads `.npz`, episode-level train/val split, action counts)
+- `src/vla_agent/models.py` - `CrafterCNN` (Nature DQN encoder for 64×64, ~350K params)
+- `scripts/train_imitation.py` - Behavioral cloning training (cross-entropy, Adam, MLflow tracking, `--no-mlflow` flag)
+- `scripts/evaluate_policy.py` - Rollout evaluation (greedy argmax, per-task success rates)
+- `tests/test_data_model.py` - 55 unit tests (dataset, model, save/load, reproducibility)
+- `tests/test_training_eval.py` - 13 tests (2 unit + 11 integration, auto-skipped by default)
+- `tests/conftest.py` - Auto-skips `integration` and `slow` tests unless `-m` is passed
+- New dependency: `mlflow>=3.10.1`
+
+### How to Run MVP-1
+
+```bash
+# Unit tests only (2s)
+uv run python -m pytest
+
+# Integration tests (30s, spawns training/eval subprocesses)
+uv run python -m pytest -m integration
+
+# Full training (20 epochs on real trajectories)
+uv run python scripts/train_imitation.py \
+    --data-dirs artifacts/trajectories/collect_wood artifacts/trajectories/place_table artifacts/trajectories/collect_stone \
+    --output-dir artifacts/models/mvp1 \
+    --epochs 20 --batch-size 64 --lr 1e-3 --seed 42
+
+# Evaluation (50 episodes)
+uv run python scripts/evaluate_policy.py \
+    --model artifacts/models/mvp1/best_model.pt \
+    --num-episodes 50 --base-seed 1000 \
+    --output-dir artifacts/eval/mvp1
+```
+
+**Status:** Code implemented and reviewed (79 unit + 11 integration tests passing). Next: full 20-epoch training run + 50-episode evaluation to validate AC-6 (>60% val_acc) and AC-8 (asymmetric success rates).
 
 ---
 
@@ -146,6 +182,27 @@ spec (human-approved) -> tests -> test review -> implement -> validate -> code r
 - Do not rewrite existing Unicode symbols, typography, or file encoding in docs/specs unless the user explicitly requests it.
 - Do not replace arrows, box-drawing characters, bullets, quotes, or similar formatting with different characters as a side effect of unrelated edits.
 - If a document requires content edits, preserve its existing visible text formatting exactly unless the requested task is specifically about documentation formatting.
+
+## Rule #10: No Monkey-Patching Library Internals
+
+- Never patch, replace, or override functions/methods from third-party libraries at import time or runtime.
+- If a library API doesn't work as expected (e.g., Windows path handling), use the library's own configuration mechanisms or pass correctly formatted inputs.
+- If no clean solution exists, isolate the workaround in one wrapper function at the call site — not in `__init__.py` via global patching.
+- Monkey-patches break silently on library upgrades and create invisible coupling.
+
+## Rule #11: Test Tier Separation
+
+- **Unit tests** run in seconds, use no subprocesses, no network, no GPU, no Crafter. They are the default `pytest` target.
+- **Integration tests** (marked `@pytest.mark.integration`) may spawn subprocesses, train models, or run environment rollouts. They are **skipped by default** and run only via `pytest -m integration`.
+- **Slow tests** (marked `@pytest.mark.slow`) are long-running integration tests (full training, 50+ episode evals). Skipped by default, run via `pytest -m slow`.
+- `tests/conftest.py` enforces this: unmarked `pytest` runs skip `integration` and `slow` automatically.
+- A test that launches training or evaluation is **never** a unit test — always mark it `@pytest.mark.integration` or `@pytest.mark.slow`.
+
+## Rule #12: Config Consistency Across Outputs
+
+- When the same config value is written to multiple outputs (JSON logs, MLflow params, console), use identical types and representations everywhere.
+- Do not use `None`/null in one output and `"none"` (string) in another for the same field.
+- Define the canonical representation once and reuse it.
 
 ---
 

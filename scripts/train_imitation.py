@@ -19,7 +19,9 @@ from vla_agent.models import CrafterCNN
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a vision-only Crafter imitation policy.")
-    parser.add_argument("--data-dirs", nargs="+", required=True, help="Trajectory directories to load")
+    parser.add_argument(
+        "--data-dirs", nargs="+", required=True, help="Trajectory directories to load"
+    )
     parser.add_argument("--output-dir", type=str, default="artifacts/models/mvp1")
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=64)
@@ -28,7 +30,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", choices=["cpu", "cuda", "auto"], default="auto")
     parser.add_argument("--experiment-name", type=str, default="mvp1")
-    parser.add_argument("--class-weights", action="store_true", help="Use inverse-frequency class weights")
+    parser.add_argument(
+        "--class-weights", action="store_true", help="Use inverse-frequency class weights"
+    )
     parser.add_argument("--no-mlflow", action="store_true", help="Disable MLflow tracking")
     return parser.parse_args()
 
@@ -89,7 +93,9 @@ def _make_loss(
     if mask.any():
         mean_count = counts[mask].mean()
         weights[mask] = mean_count / counts[mask]
-    return nn.CrossEntropyLoss(weight=torch.from_numpy(weights).to(device=device, dtype=torch.float32))
+    return nn.CrossEntropyLoss(
+        weight=torch.from_numpy(weights).to(device=device, dtype=torch.float32)
+    )
 
 
 def _train_one_epoch(
@@ -263,7 +269,7 @@ def train() -> None:
 
         config = dict(params)
         config["data_dirs"] = [str(Path(d)) for d in args.data_dirs]
-        config["class_weights"] = "inverse_frequency" if args.class_weights else None
+        config["class_weights"] = "inverse_frequency" if args.class_weights else "none"
         train_log = {
             "config": config,
             "epochs": epoch_records,

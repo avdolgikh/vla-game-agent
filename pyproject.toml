@@ -21,6 +21,7 @@ dev = [
 testpaths = ["tests"]
 markers = [
     "integration: marks tests that require the Crafter environment",
+    "slow: marks tests that take a long time to run (e.g. full training on real data)",
 ]
 
 [tool.ruff]
