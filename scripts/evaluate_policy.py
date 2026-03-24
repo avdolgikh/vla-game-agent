@@ -1,4 +1,4 @@
-"""Evaluate a trained Crafter policy via environment rollouts."""
+"""Evaluate trained Crafter policies (CNN baseline or VLA) via environment rollouts."""
 
 from __future__ import annotations
 
@@ -9,15 +9,20 @@ from pathlib import Path
 import torch
 
 from vla_agent.envs.crafter_env import CrafterEnv
-from vla_agent.models import CrafterCNN
+from vla_agent.models import CrafterCNN, CrafterVLA, InstructionEncoder
 
 TASK_NAMES = ("collect_wood", "place_table", "collect_stone")
+INSTRUCTION_TASK_MAP = {
+    "collect wood": "collect_wood",
+    "place table": "place_table",
+    "collect stone": "collect_stone",
+}
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate an imitation policy in Crafter.")
     parser.add_argument("--model", type=str, required=True, help="Path to model checkpoint (.pt)")
-    parser.add_argument("--policy-type", choices=["cnn"], default="cnn")
+    parser.add_argument("--policy-type", choices=["cnn", "vla"], default="cnn")
     parser.add_argument("--num-episodes", type=int, default=50)
     parser.add_argument("--max-steps", type=int, default=300)
     parser.add_argument("--base-seed", type=int, default=1000)
@@ -38,10 +43,13 @@ def _resolve_device(arg: str) -> torch.device:
     raise ValueError(f"Unknown device option: {arg}")
 
 
-def _load_policy(policy_type: str, model_path: Path, device: torch.device) -> CrafterCNN:
-    if policy_type != "cnn":
+def _load_policy(policy_type: str, model_path: Path, device: torch.device) -> torch.nn.Module:
+    if policy_type == "cnn":
+        model = CrafterCNN(num_actions=CrafterEnv.num_actions)
+    elif policy_type == "vla":
+        model = CrafterVLA(num_actions=CrafterEnv.num_actions, pretrained=False)
+    else:
         raise ValueError(f"Unsupported policy type: {policy_type}")
-    model = CrafterCNN(num_actions=CrafterEnv.num_actions)
     state = torch.load(model_path, map_location=device)
     model.load_state_dict(state)
     model.to(device)
@@ -65,10 +73,12 @@ def _success_flags(info: dict) -> dict[str, bool]:
 
 
 def _run_episode(
-    model: CrafterCNN,
+    model: torch.nn.Module,
     seed: int,
     max_steps: int,
     device: torch.device,
+    policy_type: str,
+    text_embed: torch.Tensor | None = None,
 ) -> tuple[int, float, dict[str, bool]]:
     env = CrafterEnv(seed=seed)
     try:
@@ -78,7 +88,12 @@ def _run_episode(
         for _ in range(max_steps):
             obs_tensor = _obs_to_tensor(obs, device)
             with torch.no_grad():
-                logits = model(obs_tensor)
+                if policy_type == "cnn":
+                    logits = model(obs_tensor)
+                else:
+                    if text_embed is None:
+                        raise RuntimeError("VLA policies require a text embedding.")
+                    logits = model(obs_tensor, text_embed)
             action = int(logits.argmax(dim=1).item())
             obs, reward, terminated, truncated, info = env.step(action)
             total_reward += float(reward)
@@ -103,56 +118,133 @@ def evaluate() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     results_path = output_dir / "eval_results.json"
 
-    success_counts = {task: 0 for task in TASK_NAMES}
-    episodes: list[dict[str, object]] = []
-
-    for idx in range(args.num_episodes):
-        seed = args.base_seed + idx
-        num_steps, total_reward, success = _run_episode(model, seed, args.max_steps, device)
-        episodes.append(
-            {
-                "seed": seed,
-                "num_steps": num_steps,
-                "total_reward": total_reward,
-                "successes": success,
-            }
-        )
-        for task, succeeded in success.items():
-            success_counts[task] += int(bool(succeeded))
-
-        print(
-            "Episode {ep:02d}/{total:02d} | seed={seed} | steps={steps:03d} | reward={reward:.1f} | "
-            "wood={wood} table={table} stone={stone}".format(
-                ep=idx + 1,
-                total=args.num_episodes,
-                seed=seed,
-                steps=num_steps,
-                reward=total_reward,
-                wood=int(success["collect_wood"]),
-                table=int(success["place_table"]),
-                stone=int(success["collect_stone"]),
+    if args.policy_type == "cnn":
+        success_counts = {task: 0 for task in TASK_NAMES}
+        episodes: list[dict[str, object]] = []
+        for idx in range(args.num_episodes):
+            seed = args.base_seed + idx
+            num_steps, total_reward, success = _run_episode(
+                model, seed, args.max_steps, device, "cnn"
             )
-        )
+            episodes.append(
+                {
+                    "seed": seed,
+                    "num_steps": num_steps,
+                    "total_reward": total_reward,
+                    "successes": success,
+                }
+            )
+            for task, succeeded in success.items():
+                success_counts[task] += int(bool(succeeded))
 
-    success_rates = {
-        task: (success_counts[task] / args.num_episodes) if args.num_episodes else 0.0
-        for task in TASK_NAMES
-    }
-    results = {
-        "model": str(model_path),
-        "num_episodes": args.num_episodes,
-        "base_seed": args.base_seed,
-        "max_steps": args.max_steps,
-        "success_rates": success_rates,
-        "episodes": episodes,
-    }
+            print(
+                "Episode {ep:02d}/{total:02d} | seed={seed} | steps={steps:03d} | reward={reward:.1f} | "
+                "wood={wood} table={table} stone={stone}".format(
+                    ep=idx + 1,
+                    total=args.num_episodes,
+                    seed=seed,
+                    steps=num_steps,
+                    reward=total_reward,
+                    wood=int(success["collect_wood"]),
+                    table=int(success["place_table"]),
+                    stone=int(success["collect_stone"]),
+                )
+            )
+
+        success_rates = {
+            task: (success_counts[task] / args.num_episodes) if args.num_episodes else 0.0
+            for task in TASK_NAMES
+        }
+        results = {
+            "model": str(model_path),
+            "model_type": "cnn",
+            "policy_type": "cnn",
+            "num_episodes": args.num_episodes,
+            "base_seed": args.base_seed,
+            "max_steps": args.max_steps,
+            "success_rates": success_rates,
+            "episodes": episodes,
+        }
+        print(f"Done. {args.num_episodes} episodes evaluated.")
+        for task in TASK_NAMES:
+            count = success_counts[task]
+            rate = success_rates[task] * 100.0
+            print(f"  {task}:  {count}/{args.num_episodes} ({rate:.1f}%)")
+    else:
+        encoder = InstructionEncoder(device=device)
+        seeds = [args.base_seed + idx for idx in range(args.num_episodes)]
+        instruction_results: dict[str, dict[str, object]] = {}
+        success_rates: dict[str, float] = {}
+        episodes: list[dict[str, object]] = []
+        total_episodes = len(seeds) * len(INSTRUCTION_TASK_MAP)
+
+        for instruction, task in INSTRUCTION_TASK_MAP.items():
+            print(f'Evaluating instruction: "{instruction}"')
+            text_embed = encoder.encode(instruction).unsqueeze(0)
+            text_embed = text_embed.to(device)
+            instruction_episodes: list[dict[str, object]] = []
+            successes = 0
+            for idx, seed in enumerate(seeds):
+                num_steps, total_reward, success = _run_episode(
+                    model,
+                    seed,
+                    args.max_steps,
+                    device,
+                    "vla",
+                    text_embed=text_embed,
+                )
+                task_success = bool(success.get(task, False))
+                instruction_episodes.append(
+                    {
+                        "seed": seed,
+                        "num_steps": num_steps,
+                        "total_reward": total_reward,
+                        "success": task_success,
+                    }
+                )
+                episodes.append(
+                    {
+                        "instruction": instruction,
+                        "task": task,
+                        "seed": seed,
+                        "num_steps": num_steps,
+                        "total_reward": total_reward,
+                        "success": task_success,
+                        "successes": success,
+                    }
+                )
+                successes += int(task_success)
+                print(
+                    f"  Episode {idx + 1:02d}/{len(seeds):02d} | seed={seed} | steps={num_steps:03d} | "
+                    f"reward={total_reward:.1f} | success={int(task_success)}"
+                )
+            success_rate = successes / len(seeds) if seeds else 0.0
+            instruction_results[instruction] = {
+                "task": task,
+                "success_rate": success_rate,
+                "successes": successes,
+                "episodes": instruction_episodes,
+            }
+            success_rates[task] = success_rate
+
+        results = {
+            "model": str(model_path),
+            "model_type": "vla",
+            "policy_type": "vla",
+            "num_episodes": total_episodes,
+            "num_episodes_per_instruction": args.num_episodes,
+            "base_seed": args.base_seed,
+            "max_steps": args.max_steps,
+            "success_rates": success_rates,
+            "instructions": instruction_results,
+            "episodes": episodes,
+        }
+        print(f"Done. {total_episodes} episodes evaluated ({args.num_episodes} per instruction).")
+        for instruction, entry in instruction_results.items():
+            rate = entry["success_rate"] * 100.0
+            print(f'  "{instruction}": {entry["successes"]}/{args.num_episodes} ({rate:.1f}%)')
+
     results_path.write_text(json.dumps(results, indent=2))
-
-    print(f"Done. {args.num_episodes} episodes evaluated.")
-    for task in TASK_NAMES:
-        count = success_counts[task]
-        rate = success_rates[task] * 100.0
-        print(f"  {task}:  {count}/{args.num_episodes} ({rate:.1f}%)")
     print(f"Saved: {results_path}")
 
 

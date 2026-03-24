@@ -22,6 +22,7 @@ class TrajectoryDataset(Dataset):
         self._num_actions: int | None = None
         self._observations: np.ndarray
         self._actions: np.ndarray
+        self._instructions: list[str]
         self._action_counts: np.ndarray | None = None
         self._load_directories(data_dirs)
 
@@ -32,14 +33,15 @@ class TrajectoryDataset(Dataset):
     def __len__(self) -> int:
         return int(self._actions.shape[0])
 
-    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor | str]:
         obs = self._observations[index]
         action = int(self._actions[index])
         obs_tensor = torch.from_numpy(obs).permute(2, 0, 1).to(torch.float32) / 255.0
         if self._transform is not None:
             obs_tensor = self._transform(obs_tensor)
         action_tensor = torch.tensor(action, dtype=torch.long)
-        return {"observation": obs_tensor, "action": action_tensor}
+        instruction = self._instructions[index] if self._instructions else ""
+        return {"observation": obs_tensor, "action": action_tensor, "instruction": instruction}
 
     # ------------------------------------------------------------------
     # Public helpers
@@ -73,6 +75,14 @@ class TrajectoryDataset(Dataset):
                 self._action_counts = counts.astype(np.int64, copy=False)
         return self._action_counts.copy()
 
+    def instructions(self) -> list[str]:
+        """Return a copy of the per-sample instruction strings."""
+        return list(self._instructions)
+
+    def unique_instructions(self) -> list[str]:
+        """Return the distinct instruction strings present in the dataset."""
+        return sorted(set(self._instructions))
+
     # ------------------------------------------------------------------
     # Internal loading helpers
     # ------------------------------------------------------------------
@@ -80,6 +90,7 @@ class TrajectoryDataset(Dataset):
     def _load_directories(self, data_dirs: Sequence[str | Path]) -> None:
         obs_chunks: list[np.ndarray] = []
         action_chunks: list[np.ndarray] = []
+        instruction_chunks: list[list[str]] = []
         total_samples = 0
 
         for directory in data_dirs:
@@ -102,6 +113,10 @@ class TrajectoryDataset(Dataset):
                     f"{action_space_size}"
                 )
 
+            instruction_text = manifest.get("instruction", "")
+            if not isinstance(instruction_text, str):
+                instruction_text = "" if instruction_text is None else str(instruction_text)
+
             episodes = manifest.get("episodes", [])
             for episode_meta in episodes:
                 npz_path = dir_path / episode_meta["file"]
@@ -117,6 +132,7 @@ class TrajectoryDataset(Dataset):
                     )
                 obs_chunks.append(observations[:-1].astype(np.uint8, copy=False))
                 action_chunks.append(actions.astype(np.int64, copy=False))
+                instruction_chunks.append([instruction_text] * actions.shape[0])
                 start = total_samples
                 total_samples += actions.shape[0]
                 self._episode_slices.append((start, total_samples))
@@ -124,11 +140,16 @@ class TrajectoryDataset(Dataset):
         if not obs_chunks:
             self._observations = np.empty((0, 64, 64, 3), dtype=np.uint8)
             self._actions = np.empty((0,), dtype=np.int64)
+            self._instructions = []
             if self._num_actions is None:
                 self._num_actions = 0
         else:
             self._observations = np.concatenate(obs_chunks, axis=0)
             self._actions = np.concatenate(action_chunks, axis=0)
+            flat_instructions: list[str] = []
+            for chunk in instruction_chunks:
+                flat_instructions.extend(chunk)
+            self._instructions = flat_instructions
 
 
 def train_val_split(

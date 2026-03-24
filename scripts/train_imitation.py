@@ -1,4 +1,4 @@
-"""Train the MVP-1 vision-only Crafter policy via behavioral cloning."""
+"""Train Crafter imitation policies (vision-only CNN or instruction-conditioned VLA)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import argparse
 import json
 import random
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 import torch
@@ -14,11 +14,11 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from vla_agent.data import TrajectoryDataset, train_val_split
-from vla_agent.models import CrafterCNN
+from vla_agent.models import CrafterCNN, CrafterVLA, InstructionEncoder
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train a vision-only Crafter imitation policy.")
+    parser = argparse.ArgumentParser(description="Train a Crafter imitation policy.")
     parser.add_argument(
         "--data-dirs", nargs="+", required=True, help="Trajectory directories to load"
     )
@@ -30,6 +30,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", choices=["cpu", "cuda", "auto"], default="auto")
     parser.add_argument("--experiment-name", type=str, default="mvp1")
+    parser.add_argument(
+        "--model-type",
+        choices=["cnn", "vla"],
+        default="cnn",
+        help="Model architecture to train",
+    )
     parser.add_argument(
         "--class-weights", action="store_true", help="Use inverse-frequency class weights"
     )
@@ -99,11 +105,14 @@ def _make_loss(
 
 
 def _train_one_epoch(
-    model: CrafterCNN,
+    model: nn.Module,
     loader: DataLoader,
     optimizer: torch.optim.Optimizer,
     criterion: nn.Module,
     device: torch.device,
+    model_type: str,
+    instruction_cache: dict[str, torch.Tensor] | None,
+    instruction_encoder: InstructionEncoder | None,
 ) -> float:
     model.train()
     total_loss = 0.0
@@ -112,7 +121,15 @@ def _train_one_epoch(
         obs = batch["observation"].to(device)
         actions = batch["action"].to(device)
         optimizer.zero_grad(set_to_none=True)
-        logits = model(obs)
+        logits = _forward_model(
+            model_type,
+            model,
+            obs,
+            batch,
+            instruction_cache,
+            instruction_encoder,
+            device,
+        )
         loss = criterion(logits, actions)
         loss.backward()
         optimizer.step()
@@ -125,10 +142,13 @@ def _train_one_epoch(
 
 
 def _evaluate(
-    model: CrafterCNN,
+    model: nn.Module,
     loader: DataLoader,
     criterion: nn.Module,
     device: torch.device,
+    model_type: str,
+    instruction_cache: dict[str, torch.Tensor] | None,
+    instruction_encoder: InstructionEncoder | None,
 ) -> tuple[float, float]:
     model.eval()
     total_loss = 0.0
@@ -138,7 +158,15 @@ def _evaluate(
         for batch in loader:
             obs = batch["observation"].to(device)
             actions = batch["action"].to(device)
-            logits = model(obs)
+            logits = _forward_model(
+                model_type,
+                model,
+                obs,
+                batch,
+                instruction_cache,
+                instruction_encoder,
+                device,
+            )
             loss = criterion(logits, actions)
             batch_size = actions.shape[0]
             total_loss += float(loss.item()) * batch_size
@@ -191,6 +219,85 @@ def _end_mlflow_run(mlflow) -> None:
     mlflow.end_run()
 
 
+def _initialize_model(
+    model_type: str,
+    num_actions: int,
+    device: torch.device,
+    lr: float,
+) -> tuple[nn.Module, torch.optim.Optimizer]:
+    if model_type == "cnn":
+        model = CrafterCNN(num_actions=num_actions).to(device)
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    elif model_type == "vla":
+        model = CrafterVLA(num_actions=num_actions, pretrained=True).to(device)
+        optimizer = torch.optim.Adam(model.action_head.parameters(), lr=lr)
+    else:
+        raise ValueError(f"Unsupported model type: {model_type}")
+    return model, optimizer
+
+
+def _build_instruction_support(
+    model_type: str,
+    device: torch.device,
+    dataset: TrajectoryDataset,
+) -> tuple[InstructionEncoder | None, dict[str, torch.Tensor] | None]:
+    if model_type != "vla":
+        return None, None
+    encoder = InstructionEncoder(device=device)
+    cache: dict[str, torch.Tensor] = {}
+    unique_instructions = dataset.unique_instructions()
+    if unique_instructions:
+        embeddings = encoder.encode_batch(unique_instructions)
+        for idx, text in enumerate(unique_instructions):
+            cache[text] = embeddings[idx].detach().clone()
+    return encoder, cache
+
+
+def _batch_text_embeddings(
+    instructions: Sequence[str] | str,
+    cache: dict[str, torch.Tensor] | None,
+    encoder: InstructionEncoder | None,
+    device: torch.device,
+) -> torch.Tensor:
+    if cache is None or encoder is None:
+        raise RuntimeError("Instruction encoder not initialized.")
+    texts = [instructions] if isinstance(instructions, str) else list(instructions)
+    if not texts:
+        return torch.empty((0, encoder.embed_dim), dtype=torch.float32, device=device)
+    tensors: list[torch.Tensor] = []
+    for text in texts:
+        tensor = cache.get(text)
+        if tensor is None:
+            tensor = encoder.encode(text).detach().clone()
+            cache[text] = tensor
+        tensors.append(tensor)
+    stacked = torch.stack(tensors, dim=0).to(device)
+    return stacked
+
+
+def _forward_model(
+    model_type: str,
+    model: nn.Module,
+    obs: torch.Tensor,
+    batch: dict[str, Any],
+    instruction_cache: dict[str, torch.Tensor] | None,
+    instruction_encoder: InstructionEncoder | None,
+    device: torch.device,
+) -> torch.Tensor:
+    if model_type == "cnn":
+        return model(obs)
+    instructions = batch.get("instruction")
+    if instructions is None:
+        raise RuntimeError("Batch missing 'instruction' field required for VLA training.")
+    text_embeddings = _batch_text_embeddings(
+        instructions,
+        instruction_cache,
+        instruction_encoder,
+        device,
+    )
+    return model(obs, text_embeddings)
+
+
 def train() -> None:
     args = parse_args()
     device = _resolve_device(args.device)
@@ -203,9 +310,18 @@ def train() -> None:
         seed=args.seed,
         batch_size=args.batch_size,
     )
-    model = CrafterCNN(num_actions=dataset.num_actions).to(device)
+    model, optimizer = _initialize_model(
+        args.model_type,
+        dataset.num_actions,
+        device,
+        args.lr,
+    )
     criterion = _make_loss(dataset, device, args.class_weights)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    instruction_encoder, instruction_cache = _build_instruction_support(
+        args.model_type,
+        device,
+        dataset,
+    )
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -221,6 +337,7 @@ def train() -> None:
         "val_fraction": args.val_fraction,
         "seed": args.seed,
         "device": device.type,
+        "model_type": args.model_type,
         "class_weights": "inverse_frequency" if args.class_weights else "none",
         "num_train_samples": num_train,
         "num_val_samples": num_val,
@@ -235,8 +352,25 @@ def train() -> None:
         _log_mlflow_params(mlflow, params)
 
         for epoch in range(1, args.epochs + 1):
-            train_loss = _train_one_epoch(model, train_loader, optimizer, criterion, device)
-            val_loss, val_acc = _evaluate(model, val_loader, criterion, device)
+            train_loss = _train_one_epoch(
+                model,
+                train_loader,
+                optimizer,
+                criterion,
+                device,
+                args.model_type,
+                instruction_cache,
+                instruction_encoder,
+            )
+            val_loss, val_acc = _evaluate(
+                model,
+                val_loader,
+                criterion,
+                device,
+                args.model_type,
+                instruction_cache,
+                instruction_encoder,
+            )
             improved = val_acc > best_val_acc
             if improved:
                 best_val_acc = val_acc
@@ -270,6 +404,7 @@ def train() -> None:
         config = dict(params)
         config["data_dirs"] = [str(Path(d)) for d in args.data_dirs]
         config["class_weights"] = "inverse_frequency" if args.class_weights else "none"
+        config["model_type"] = args.model_type
         train_log = {
             "config": config,
             "epochs": epoch_records,

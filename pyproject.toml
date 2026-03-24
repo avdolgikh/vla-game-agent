@@ -9,6 +9,8 @@ dependencies = [
     "numpy>=1.24",
     "imageio[ffmpeg,pyav]>=2.31",
     "mlflow>=3.10.1",
+    "torchvision>=0.25.0",
+    "transformers>=4.30",
 ]
 
 [project.optional-dependencies]

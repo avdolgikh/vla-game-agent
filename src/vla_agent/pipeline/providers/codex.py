@@ -81,6 +81,8 @@ class CodexProvider:
             self._sandbox_for_role[role],
             "--model",
             config.model,
+            "-c",
+            'model_reasoning_effort="high"',
         ]
         if schema_path is not None:
             command.extend(["--output-schema", str(schema_path)])

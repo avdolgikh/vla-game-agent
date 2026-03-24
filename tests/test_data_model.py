@@ -43,6 +43,9 @@ def _make_policy_dir(
     num_episodes: int,
     steps_per_episode: list[int] | None = None,
     seed: int = 0,
+    *,
+    instruction: str | None = None,
+    include_instruction: bool = True,
 ) -> Path:
     """
     Create a trajectory directory with manifest.json and episode_NNN.npz files.
@@ -72,7 +75,6 @@ def _make_policy_dir(
 
     manifest = {
         "policy": policy_name,
-        "instruction": f"do {policy_name}",
         "action_space_size": NUM_ACTIONS,
         "observation_shape": [64, 64, 3],
         "num_episodes": num_episodes,
@@ -80,6 +82,8 @@ def _make_policy_dir(
         "success_count": num_episodes,
         "episodes": episodes_meta,
     }
+    if include_instruction:
+        manifest["instruction"] = instruction or f"do {policy_name}"
     (policy_dir / "manifest.json").write_text(json.dumps(manifest))
     return policy_dir
 
@@ -332,6 +336,64 @@ class TestTrajectoryDatasetLoading:
             assert actual_action == expected_action, (
                 f"At step {t}: expected action {expected_action}, got {actual_action}"
             )
+
+
+class TestTrajectoryDatasetInstructions:
+    """AC-1 extension: TrajectoryDataset exposes per-sample instructions."""
+
+    def test_sample_includes_instruction(self, tmp_path):
+        """Each sample dict must contain an 'instruction' key with the manifest string."""
+        from vla_agent.data import TrajectoryDataset
+
+        instruction_text = "collect wood"
+        policy_dir = _make_policy_dir(
+            tmp_path,
+            "collect_wood",
+            num_episodes=1,
+            steps_per_episode=[5],
+            instruction=instruction_text,
+        )
+        ds = TrajectoryDataset(data_dirs=[str(policy_dir)])
+        sample = ds[0]
+        assert "instruction" in sample, "Sample must include 'instruction'"
+        assert sample["instruction"] == instruction_text
+        assert isinstance(sample["instruction"], str)
+
+    def test_instructions_vary_per_policy_directory(self, tmp_path):
+        """Different trajectory directories must retain their own instruction strings."""
+        from vla_agent.data import TrajectoryDataset
+
+        instruction_set = ["collect wood", "place table", "collect stone"]
+        dirs = []
+        for idx, instruction in enumerate(instruction_set):
+            dirs.append(
+                _make_policy_dir(
+                    tmp_path / f"dir_{idx}",
+                    "policy",
+                    num_episodes=1,
+                    steps_per_episode=[5],
+                    seed=idx,
+                    instruction=instruction,
+                )
+            )
+        ds = TrajectoryDataset(data_dirs=[str(d) for d in dirs])
+        seen_instructions = {ds[i]["instruction"] for i in range(len(ds))}
+        assert set(instruction_set) <= seen_instructions
+
+    def test_missing_instruction_field_defaults_to_empty(self, tmp_path):
+        """Manifests that omit 'instruction' must produce empty-string instructions."""
+        from vla_agent.data import TrajectoryDataset
+
+        policy_dir = _make_policy_dir(
+            tmp_path,
+            "collect_wood",
+            num_episodes=1,
+            steps_per_episode=[5],
+            include_instruction=False,
+        )
+        ds = TrajectoryDataset(data_dirs=[str(policy_dir)])
+        for i in range(len(ds)):
+            assert ds[i]["instruction"] == ""
 
 
 # ---------------------------------------------------------------------------
