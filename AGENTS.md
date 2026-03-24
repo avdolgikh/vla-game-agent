@@ -77,6 +77,10 @@ Document every significant decision here as it happens.
 - **2026-03-23**: MVP-2 spec approved (`specs/mvp-2-spec.md`). 12 acceptance criteria. Architecture: frozen ConvNeXt-Tiny (vision, 768-d) + frozen all-MiniLM-L6-v2 (text, 384-d) + trainable MLP action head (1152→256→8, ~297K params). Modifies existing files (data.py, models.py, train_imitation.py, evaluate_policy.py) with backward-compatible changes. New dependencies: torchvision, transformers.
 - **2026-03-23**: MVP-2 complete. val_acc=51.6% (AC-6 soft target not met — domain gap). collect_wood 72% (9× over MVP-1's 8%), place_table 22% (MVP-1: 84%), collect_stone 0% (MVP-1: 10%). Instruction conditioning proven for simple tasks; multi-step tasks limited by single-frame architecture. StochasticDepth bug found and fixed (ConvNeXt train mode drops residual connections in frozen backbone).
 - **2026-03-23**: Pipeline extension spec drafted (`specs/pipeline-training-stages-spec.md`). Adds stages 6 (Training), 7 (Evaluation), 8 (Acceptance Verification) to automate the gap between "code approved" and "artifacts verified." No LLM invocation — pure subprocess + JSON metrics checks.
+- **2026-03-23**: 224×224 resize experiment completed (background task from earlier session). Upscaling 64×64 frames to ConvNeXt's preferred resolution improved val_acc from 51.6% to **61.0%** (passes AC-6 >60% target). Simple `torchvision.transforms.Resize(224)` in forward — no architecture change. Trade-off: ~12× more pixels, slower on CPU. This validates the spec's "try resize to 224×224" fallback suggestion. Current code/artifacts remain at 64×64; the 224×224 result is recorded as a proven improvement path.
+- **2026-03-23**: VLA quality improvements spec drafted (`specs/vla-quality-improvements-spec.md`). 10 improvement directions ranked by impact/effort. Top recommendations: (1) 224×224 resize (proven +9.4%), (2) frame stacking for temporal context, (3) unfreeze last ConvNeXt stage, (4) replace frozen ConvNeXt with trainable lightweight CNN.
+- **2026-03-23**: Architecture insight — frozen pretrained encoders must be fed at their training resolution. ConvNeXt at 64×64 collapses internal feature maps to 2×2 before pooling (4 spatial positions); at 224×224 it's 7×7 (49 positions). The 9.4% val_acc improvement is spatial scale alignment, not model capacity. Rule: always resize to training resolution for frozen encoders; trainable CNNs can use native 64×64 since they learn the right scale.
+- **2026-03-23**: Execution plan established for future sessions. Order: (1) Pipeline-ext (automate training/eval/verify stages), (2) MVP-2.1 (224×224 resize), (3) MVP-2.2 (frame stacking + wider head), (4) MVP-2.3 (domain adaptation). Each step uses the extended pipeline. Full plan documented in "Next Steps Plan" section below.
 
 ---
 
@@ -88,6 +92,10 @@ Document every significant decision here as it happens.
 | MVP-0b | Scripted policies + trajectory data | **Done** (104 tests, all passing) |
 | MVP-1 | Vision-only imitation baseline ("V" only — no text) | **Done** — val_acc=71.6%, asymmetric success (8%/84%/10%) |
 | MVP-2 | Instruction-conditioned VLA policy ("V+L→A") | **Done** — val_acc=51.6%, collect_wood 72%/place_table 22%/collect_stone 0% |
+| MVP-2.1 | 224×224 resize (proven quick win) | Planned — spec ready |
+| MVP-2.2 | Frame stacking + wider head (temporal context) | Planned — spec ready |
+| MVP-2.3 | Domain adaptation (trainable CNN or unfrozen ConvNeXt) | Planned — spec ready |
+| Pipeline-ext | Training/Evaluation/Verification pipeline stages | Planned — spec ready, prerequisite for MVP-2.1+ |
 | MVP-3 | Portfolio polish | Planned |
 
 ### MVP-0a Deliverables
@@ -221,6 +229,99 @@ uv run python scripts/evaluate_policy.py \
 - **Domain gap:** Frozen ImageNet features on 64×64 pixel art is the primary bottleneck. The vision encoder sees textures/edges trained on real photos, not the symbolic pixel art of Crafter. val_acc plateaus at ~50% regardless of regularization (dropout, class weights).
 - **Instruction conditioning validation:** Different instructions produce dramatically different success rates (66%/10%/0%), proving the text embeddings influence model behavior. If text were ignored, all instructions would yield similar rates.
 - **Single-frame limitation:** The model sees one frame and predicts one action. Tasks requiring multi-step sequences (collect_wood → place_table → make_pickaxe → collect_stone) cannot be solved without temporal reasoning or memory.
+- **224×224 resize experiment:** Upscaling 64×64 frames to ConvNeXt's preferred 224×224 resolution improved val_acc from 51.6% to **61.0%** (+9.4%). Passes AC-6 (>60%). No architecture change — just `Resize(224)` in forward. Trade-off: ~12× more computation per frame, significantly slower on CPU. Proven improvement path for future work.
+
+### MVP-2 Experiment Log
+
+| Experiment | val_acc | Notes |
+|------------|---------|-------|
+| No StochasticDepth fix | 49.6% | Noisy features from random residual dropping |
+| + StochasticDepth fix (64×64) | 51.6% | Backbone in eval mode, deterministic features |
+| + Dropout 0.3 in action head | 49.0% | Reduced overfitting gap but didn't improve ceiling |
+| + Class weights | 40.8% (7 ep) | Hurt raw accuracy, helped class balance |
+| + 224×224 resize (no dropout) | **61.0%** | Best result, passes AC-6. ConvNeXt prefers native resolution. |
+
+### Why 224×224 Helps (Technical Explanation)
+
+ConvNeXt-Tiny was trained on 224×224 ImageNet images. Its 4-stage architecture progressively downsamples:
+
+| Stage | 64×64 input | 224×224 input |
+|-------|------------|---------------|
+| Stem (stride 4) | 16×16 | 56×56 |
+| Stage 2 | 8×8 | 28×28 |
+| Stage 3 | 4×4 | 14×14 |
+| Stage 4 | 2×2 | 7×7 |
+| Average pool | 2×2 → 1×1 | 7×7 → 1×1 |
+
+At 64×64 input, the final feature map is **2×2 = 4 spatial positions** — almost all spatial information is destroyed before pooling. At 224×224, it's **7×7 = 49 positions** — 12× richer. The 768-d output vector captures far more about the scene.
+
+This is **spatial scale alignment, not model capacity** — same parameters, same architecture. The frozen filters produce more meaningful activations when features appear at the scale they were trained to detect. Implication: **any frozen pretrained encoder must be fed at its training resolution.** If using a trainable CNN, 64×64 is fine because the CNN learns the right scale from scratch.
+
+---
+
+## Next Steps Plan (for Future Sessions)
+
+This section is the authoritative roadmap for any coding agent working on this project. Follow in order.
+
+### Prerequisites
+
+All specs are written and ready:
+- `specs/pipeline-training-stages-spec.md` — Pipeline extension (stages 6-8)
+- `specs/vla-quality-improvements-spec.md` — 10 improvement directions with impact/effort analysis
+
+### Step 1: Extend Pipeline (Pipeline-ext)
+
+**Why first:** Every subsequent improvement step involves training, evaluation, and verification. Automating this once means all future experiments are `run_pipeline.py` invocations, not manual work.
+
+**Spec:** `specs/pipeline-training-stages-spec.md`
+**Run:** `uv run python scripts/run_pipeline.py pipeline-ext --provider codex`
+**Deliverable:** Pipeline stages 6 (Training), 7 (Evaluation), 8 (Acceptance Verification) working end-to-end.
+
+### Step 2: Apply 224×224 Resize (MVP-2.1)
+
+**Why next:** Already proven (+9.4% val_acc), one-line code change, passes AC-6. Establishes a stronger baseline for all subsequent experiments.
+
+**What to do:**
+1. Write a short spec for 224×224 resize (acceptance criteria: val_acc > 0.60, evaluate all 3 instructions)
+2. Run through the extended pipeline (spec → tests → implement → train → evaluate → verify)
+3. **Key implementation detail:** Add `torchvision.transforms.Resize(224, antialias=True)` in `CrafterVLA.forward()` before ImageNet normalization. No other architecture change.
+4. **Important:** The resize must be inside the model (not the dataset) so the same model can accept any input resolution and evaluation code doesn't need changes.
+
+**Expected:** val_acc ~61%, hopefully improved place_table success rate.
+
+### Step 3: Frame Stacking + Wider Head (MVP-2.2)
+
+**Why next:** Highest expected impact for multi-step tasks (place_table, collect_stone). The single-frame limitation is the #1 bottleneck for those tasks.
+
+**What to do:**
+1. Write spec for frame stacking (4 frames, channel concatenation) + wider action head (1152→512→256→8)
+2. **Changes needed:**
+   - `CrafterVLA`: accept (B, 12, H, W) input (4 frames × 3 channels). Process each frame through ConvNeXt independently, concatenate features.
+   - `TrajectoryDataset`: return sequences of 4 consecutive frames per sample instead of single frames.
+   - `evaluate_policy.py`: maintain a frame buffer during rollout, feed last 4 frames to model.
+3. Run through extended pipeline.
+
+**Expected:** val_acc ~68-72%, place_table > 40%, collect_stone > 10%.
+
+### Step 4: Domain Adaptation (MVP-2.3)
+
+**Two competing approaches — pick one based on Steps 2-3 results:**
+
+**Option A: Replace ConvNeXt with trainable lightweight CNN**
+- MVP-1's CrafterCNN (350K params) got 71.6% val_acc on 64×64 — better than frozen ConvNeXt. A trainable CNN that learns Crafter-specific features, combined with frame stacking, could be the sweet spot.
+- Drops the 224×224 resize requirement (CNN learns at native 64×64).
+- Faster training on CPU.
+
+**Option B: Unfreeze last ConvNeXt stage**
+- Keep 224×224, unfreeze last 1-2 ConvNeXt stages with differential LR (10× lower).
+- Progressive schedule: epochs 1-5 head only, 5-10 unfreeze last stage.
+- Risk: overfitting with 33K samples.
+
+**Decision criteria:** If 224×224 resize + frame stacking achieves >70% val_acc and >40% place_table, Option B (incremental unfreezing) is lower risk. If still <65%, Option A (trainable CNN from scratch) is worth the bigger change.
+
+### Step 5: Portfolio Polish (MVP-3)
+
+After achieving balanced task success, polish the project for portfolio presentation.
 
 ---
 
