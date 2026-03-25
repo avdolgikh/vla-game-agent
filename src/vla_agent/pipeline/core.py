@@ -5,11 +5,14 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
 import sys
 from typing import Any
+
+import yaml
 
 from vla_agent.pipeline.providers.base import Provider, ProviderExecution
 
@@ -31,7 +34,10 @@ STAGE_ORDER = {
     "TESTS_FROZEN": 2,
     "CODE_IMPLEMENTED": 3,
     "CODE_VALIDATED": 4,
-    "DONE": 5,
+    "CODE_REVIEWED": 5,
+    "ARTIFACTS_PRODUCED": 6,
+    "ARTIFACTS_VALIDATED": 7,
+    "VERIFIED": 8,
 }
 
 REPO_HASH_TARGETS = [
@@ -58,6 +64,10 @@ EXIT_REVIEWER_MODIFIED_FILES = 7
 EXIT_INVALID_REVIEW_OUTPUT = 8
 EXIT_PROVIDER_EXEC_FAILED = 9
 EXIT_STAGE_NO_EFFECT = 10
+EXIT_TRAINING_FAILED = 11
+EXIT_EVALUATION_FAILED = 12
+EXIT_ACCEPTANCE_FAILED = 13
+EXIT_ARTIFACT_MISSING = 14
 
 
 class PipelineError(RuntimeError):
@@ -124,6 +134,8 @@ class PipelineState:
     stage: str
     iteration: int = 0
     frozen_tests_hash: str | None = None
+    training_metrics: dict | None = None
+    evaluation_metrics: dict | None = None
 
 
 class PipelineLogger:
@@ -324,6 +336,147 @@ def hash_paths(repo_root: Path, relative_targets: list[str]) -> str:
     return digest.hexdigest()
 
 
+@dataclass
+class MetricsCheck:
+    """A single metrics threshold check."""
+
+    path: str
+    op: str
+    value: float
+    label: str
+
+
+@dataclass
+class CheckResult:
+    """Result of a single metrics check."""
+
+    label: str
+    passed: bool
+    actual: float
+    threshold: float
+
+
+@dataclass
+class StageConfig:
+    """Configuration for a training or evaluation stage."""
+
+    command: str
+    required_files: list[str]
+    metrics_file: str
+    metrics_checks: list[MetricsCheck]
+
+
+@dataclass
+class AcceptanceConfig:
+    """Configuration for the acceptance verification stage."""
+
+    summary_file: str
+    all_checks_must_pass: bool
+    min_checks_pass: int
+
+
+@dataclass
+class ArtifactPipelineConfig:
+    """Parsed Artifact Pipeline section from a spec."""
+
+    training: StageConfig | None
+    evaluation: StageConfig | None
+    acceptance: AcceptanceConfig | None
+
+
+def navigate_json_path(data: dict, path: str) -> Any:
+    """Navigate nested JSON using dot-separated path."""
+    current: Any = data
+    for key in path.split("."):
+        if not isinstance(current, dict) or key not in current:
+            raise KeyError(f"Key '{key}' not found at path '{path}'")
+        current = current[key]
+    return current
+
+
+def run_metrics_checks(data: dict, checks: list[MetricsCheck]) -> list[CheckResult]:
+    """Run comparison checks against metrics data."""
+    ops = {
+        ">": lambda a, b: a > b,
+        ">=": lambda a, b: a >= b,
+        "<": lambda a, b: a < b,
+        "<=": lambda a, b: a <= b,
+        "==": lambda a, b: a == b,
+    }
+    results: list[CheckResult] = []
+    for check in checks:
+        actual = navigate_json_path(data, check.path)
+        passed = ops[check.op](actual, check.value)
+        results.append(
+            CheckResult(label=check.label, passed=passed, actual=actual, threshold=check.value)
+        )
+    return results
+
+
+def evaluate_acceptance(checks: list[CheckResult], config: AcceptanceConfig) -> bool:
+    """Determine if acceptance criteria are met."""
+    if config.all_checks_must_pass:
+        return all(c.passed for c in checks)
+    return sum(1 for c in checks if c.passed) >= config.min_checks_pass
+
+
+def _extract_section(text: str, heading: str, level: int = 2) -> str | None:
+    """Extract content between a markdown heading and the next same-or-higher-level heading."""
+    hashes = "#" * level
+    pattern = re.compile(rf"^{hashes} {re.escape(heading)}\s*$", re.MULTILINE)
+    match = pattern.search(text)
+    if not match:
+        return None
+    start = match.end()
+    next_heading = re.compile(rf"^#{{1,{level}}} ", re.MULTILINE)
+    next_match = next_heading.search(text, start)
+    if next_match:
+        return text[start : next_match.start()]
+    return text[start:]
+
+
+def _parse_stage_config(raw: dict) -> StageConfig:
+    """Build a StageConfig from parsed YAML data."""
+    return StageConfig(
+        command=raw["command"].strip(),
+        required_files=raw.get("required_files", []),
+        metrics_file=raw.get("metrics_file", ""),
+        metrics_checks=[
+            MetricsCheck(path=c["path"], op=c["op"], value=c["value"], label=c["label"])
+            for c in raw.get("metrics_checks", [])
+        ],
+    )
+
+
+def parse_artifact_pipeline(spec_text: str) -> ArtifactPipelineConfig | None:
+    """Parse the ## Artifact Pipeline section from spec markdown."""
+    section = _extract_section(spec_text, "Artifact Pipeline", level=2)
+    if section is None:
+        return None
+
+    training = None
+    training_text = _extract_section(section, "Training", level=3)
+    if training_text:
+        training = _parse_stage_config(yaml.safe_load(training_text))
+
+    evaluation = None
+    eval_text = _extract_section(section, "Evaluation", level=3)
+    if eval_text:
+        evaluation = _parse_stage_config(yaml.safe_load(eval_text))
+
+    acceptance = None
+    accept_text = _extract_section(section, "Acceptance", level=3)
+    if accept_text:
+        data = yaml.safe_load(accept_text)
+        acceptance = AcceptanceConfig(
+            summary_file=data.get("summary_file", ""),
+            all_checks_must_pass=data.get("all_checks_must_pass", False),
+            min_checks_pass=data.get("min_checks_pass", 0),
+        )
+
+    return ArtifactPipelineConfig(training=training, evaluation=evaluation, acceptance=acceptance)
+
+
 class PipelineRunner:
     """Runs the provider-generalized autonomous pipeline."""
 
@@ -357,12 +510,17 @@ class PipelineRunner:
             return PipelineState(task=self.task, provider=self.provider.name, stage="SPEC_APPROVED")
 
         payload = json.loads(self.state_file.read_text(encoding="utf-8"))
+        stage = payload["stage"]
+        if stage == "DONE":
+            stage = "CODE_REVIEWED"
         state = PipelineState(
             task=payload["task"],
             provider=payload["provider"],
-            stage=payload["stage"],
+            stage=stage,
             iteration=int(payload.get("iteration", 0)),
             frozen_tests_hash=payload.get("frozen_tests_hash"),
+            training_metrics=payload.get("training_metrics"),
+            evaluation_metrics=payload.get("evaluation_metrics"),
         )
         if state.provider != self.provider.name:
             raise PipelineError(
@@ -378,18 +536,33 @@ class PipelineRunner:
         return state
 
     def _save_state(
-        self, stage: str, *, iteration: int = 0, frozen_tests_hash: str | None = None
+        self,
+        stage: str,
+        *,
+        iteration: int = 0,
+        frozen_tests_hash: str | None = None,
+        training_metrics: dict | None = None,
+        evaluation_metrics: dict | None = None,
     ) -> None:
         current_hash = frozen_tests_hash
-        if current_hash is None and self.state_file.exists():
+        current_training = training_metrics
+        current_evaluation = evaluation_metrics
+        if self.state_file.exists():
             previous = json.loads(self.state_file.read_text(encoding="utf-8"))
-            current_hash = previous.get("frozen_tests_hash")
+            if current_hash is None:
+                current_hash = previous.get("frozen_tests_hash")
+            if current_training is None:
+                current_training = previous.get("training_metrics")
+            if current_evaluation is None:
+                current_evaluation = previous.get("evaluation_metrics")
         state = PipelineState(
             task=self.task,
             provider=self.provider.name,
             stage=stage,
             iteration=iteration,
             frozen_tests_hash=current_hash,
+            training_metrics=current_training,
+            evaluation_metrics=current_evaluation,
         )
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.state_file.write_text(json.dumps(asdict(state), indent=2), encoding="utf-8")
@@ -642,6 +815,110 @@ class PipelineRunner:
                 )
             return decision
 
+    def _run_implementer_fix(
+        self,
+        *,
+        error: PipelineError,
+        frozen_tests_hash: str | None,
+        iteration: int,
+    ) -> None:
+        """Invoke the implementer to fix an artifact pipeline failure."""
+        self._log_stage_header(f"Stage 6b: Artifact Fix (iter {iteration})")
+        error_context = str(error)
+        fix_prompt = self.prompts.render(
+            role="implementer",
+            task=self.task,
+            spec_path=self.spec_path,
+            stage_name="Stage 6b: Artifact Fix",
+            stage_instruction=(
+                "The artifact pipeline failed. Diagnose the issue and fix the production code "
+                "or training/evaluation scripts to resolve the error below. "
+                "Do not modify frozen tests. "
+                "Run `uv run python -m pytest` after your fix to ensure tests still pass.\n\n"
+                "## Error Details\n\n"
+                f"{error_context}"
+            ),
+            iteration=iteration,
+            reviewer_feedback=[error_context],
+        )
+        self._run_role(
+            role="implementer",
+            prompt=fix_prompt,
+            stage_label="Stage 6b: Artifact Fix",
+        )
+        self._enforce_test_freeze(frozen_tests_hash)
+        self._run_pytest_gate("Gate: pytest after artifact fix")
+
+    def _run_artifact_stage(
+        self,
+        *,
+        config: StageConfig,
+        stage_label: str,
+        error_exit_code: int,
+    ) -> list[CheckResult]:
+        """Run an artifact stage: execute command, verify files, check metrics."""
+        self._log_stage_header(stage_label)
+        self.logger.log(f"[artifact] Running: {config.command}")
+        env = os.environ.copy()
+        src_dir = str(self.repo_root / "src")
+        env["PYTHONPATH"] = src_dir + os.pathsep + env.get("PYTHONPATH", "")
+        # Strip virtualenv so the spec command's Python uses its own packages,
+        # not the pipeline orchestrator's venv (which may lack CUDA, etc.).
+        env.pop("VIRTUAL_ENV", None)
+        env.pop("PYTHONHOME", None)
+        venv_prefix = os.path.normcase(str((self.repo_root / ".venv").resolve()))
+        path_parts = env.get("PATH", "").split(os.pathsep)
+        env["PATH"] = os.pathsep.join(
+            p for p in path_parts if not os.path.normcase(p).startswith(venv_prefix)
+        )
+        result = subprocess.run(
+            config.command,
+            cwd=self.repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+            shell=True,
+            env=env,
+        )
+        if result.stdout:
+            for line in result.stdout.rstrip().splitlines():
+                self.logger.log(line)
+        if result.stderr:
+            for line in result.stderr.rstrip().splitlines():
+                self.logger.log(line)
+        if result.returncode != 0:
+            output_tail = ""
+            if result.stderr:
+                output_tail = "\n".join(result.stderr.rstrip().splitlines()[-20:])
+            elif result.stdout:
+                output_tail = "\n".join(result.stdout.rstrip().splitlines()[-20:])
+            detail = (
+                f"\nCommand: {config.command}\nOutput (last 20 lines):\n{output_tail}"
+                if output_tail
+                else ""
+            )
+            raise PipelineError(
+                f"FAIL: {stage_label} command exited with code {result.returncode}.{detail}",
+                error_exit_code,
+            )
+        for rel_path in config.required_files:
+            full_path = self.repo_root / rel_path
+            if not full_path.exists() or full_path.stat().st_size == 0:
+                raise PipelineError(
+                    f"FAIL: required artifact missing or empty: {rel_path} ({stage_label})\n"
+                    f"Command: {config.command}",
+                    EXIT_ARTIFACT_MISSING,
+                )
+        checks: list[CheckResult] = []
+        if config.metrics_file and config.metrics_checks:
+            metrics_path = self.repo_root / config.metrics_file
+            metrics_data = json.loads(metrics_path.read_text(encoding="utf-8"))
+            checks = run_metrics_checks(metrics_data, config.metrics_checks)
+            for check in checks:
+                status = "PASS" if check.passed else "WARN"
+                self.logger.log(f"[{status}] {check.label} ({check.actual} vs {check.threshold})")
+        return checks
+
     def run(self) -> int:
         if not self.spec_path.exists():
             raise PipelineError(
@@ -793,7 +1070,7 @@ class PipelineRunner:
             self._save_state("CODE_VALIDATED", frozen_tests_hash=frozen_tests_hash)
             state = self._load_state()
 
-        if not self._past(state.stage, "DONE"):
+        if not self._past(state.stage, "CODE_REVIEWED"):
             start = self._start_iteration(state, "CODE_VALIDATED")
             for iteration in range(start, self.max_revisions + 1):
                 self._log_stage_header(f"Stage 5: Code Review (iter {iteration})")
@@ -819,7 +1096,7 @@ class PipelineRunner:
                     self.logger.log("[review] fallback normalization path used")
                 self.logger.log(f"Decision: {decision.decision}")
                 if decision.decision == "approve":
-                    self._save_state("DONE", frozen_tests_hash=frozen_tests_hash)
+                    self._save_state("CODE_REVIEWED", frozen_tests_hash=frozen_tests_hash)
                     break
                 if iteration == self.max_revisions:
                     raise PipelineError(
@@ -851,6 +1128,105 @@ class PipelineRunner:
                     iteration=iteration + 1,
                     frozen_tests_hash=frozen_tests_hash,
                 )
+            state = self._load_state()
+
+        # ── Stages 6-8: Artifact Pipeline ──────────────────────
+        spec_text = self.spec_path.read_text(encoding="utf-8-sig")
+        artifact_config = parse_artifact_pipeline(spec_text)
+
+        if artifact_config is None:
+            if not self._past(state.stage, "VERIFIED"):
+                self._save_state("VERIFIED")
+        elif not self._past(state.stage, "VERIFIED"):
+            fixable_codes = {
+                EXIT_TRAINING_FAILED,
+                EXIT_EVALUATION_FAILED,
+                EXIT_ACCEPTANCE_FAILED,
+                EXIT_ARTIFACT_MISSING,
+            }
+            start = (
+                state.iteration
+                if state.stage in ("CODE_REVIEWED", "ARTIFACTS_PRODUCED", "ARTIFACTS_VALIDATED")
+                else 0
+            )
+            for iteration in range(start, self.max_revisions + 1):
+                try:
+                    if not self._past(state.stage, "ARTIFACTS_PRODUCED"):
+                        training_checks = self._run_artifact_stage(
+                            config=artifact_config.training,
+                            stage_label="Stage 6: Produce Artifacts",
+                            error_exit_code=EXIT_TRAINING_FAILED,
+                        )
+                        self._save_state(
+                            "ARTIFACTS_PRODUCED",
+                            iteration=iteration,
+                            training_metrics={"checks": [asdict(c) for c in training_checks]},
+                        )
+                        state = self._load_state()
+
+                    if not self._past(state.stage, "ARTIFACTS_VALIDATED"):
+                        eval_checks = self._run_artifact_stage(
+                            config=artifact_config.evaluation,
+                            stage_label="Stage 7: Validate Artifacts",
+                            error_exit_code=EXIT_EVALUATION_FAILED,
+                        )
+                        self._save_state(
+                            "ARTIFACTS_VALIDATED",
+                            iteration=iteration,
+                            evaluation_metrics={"checks": [asdict(c) for c in eval_checks]},
+                        )
+                        state = self._load_state()
+
+                    if not self._past(state.stage, "VERIFIED"):
+                        self._log_stage_header("Stage 8: Acceptance")
+                        all_checks: list[CheckResult] = []
+                        for raw in (state.training_metrics or {}).get("checks", []):
+                            all_checks.append(CheckResult(**raw))
+                        for raw in (state.evaluation_metrics or {}).get("checks", []):
+                            all_checks.append(CheckResult(**raw))
+
+                        for check in all_checks:
+                            status = "PASS" if check.passed else "FAIL"
+                            self.logger.log(
+                                f"[{status}] {check.label} ({check.actual} vs {check.threshold})"
+                            )
+
+                        accepted = evaluate_acceptance(all_checks, artifact_config.acceptance)
+                        passed = sum(1 for c in all_checks if c.passed)
+                        total = len(all_checks)
+                        verdict = "VERIFIED" if accepted else "FAILED"
+                        self.logger.log(
+                            f"Result: {passed}/{total} checks passed. Pipeline {verdict}."
+                        )
+
+                        if not accepted:
+                            raise PipelineError(
+                                f"FAIL: acceptance verification failed "
+                                f"({passed}/{total} checks passed).",
+                                EXIT_ACCEPTANCE_FAILED,
+                            )
+                        self._save_state("VERIFIED")
+
+                    break  # All stages passed
+
+                except PipelineError as exc:
+                    if exc.exit_code not in fixable_codes:
+                        raise
+                    if iteration == self.max_revisions:
+                        raise
+                    self._run_implementer_fix(
+                        error=exc,
+                        frozen_tests_hash=frozen_tests_hash,
+                        iteration=iteration,
+                    )
+                    self._save_state(
+                        "CODE_REVIEWED",
+                        iteration=iteration + 1,
+                        frozen_tests_hash=frozen_tests_hash,
+                        training_metrics={},
+                        evaluation_metrics={},
+                    )
+                    state = self._load_state()
 
         self.logger.log("")
         self.logger.log(f"=== Pipeline COMPLETE: {self.task} ===")

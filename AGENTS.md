@@ -76,11 +76,13 @@ Document every significant decision here as it happens.
 - **2026-03-23**: Pretrained components research completed (`specs/pretrained-components-for-vla-classifier-research.pdf`). Evaluated 3 vision encoders (ConvNeXt-Tiny, DINOv2-Small, OpenCLIP ViT-B/32), 3 text encoders (all-MiniLM-L6-v2, BGE-small-en-v1.5, DistilBERT), 2 combinations. Selected Combination B: ConvNeXt-Tiny (28.6M, 768-d, native 64×64) + all-MiniLM-L6-v2 (22.7M, 384-d). Rationale: native 64×64 support preserves pixel art, 4× smaller frozen footprint than CLIP, no positional embedding gotchas, CLIP's shared embedding space unnecessary with only 3 instructions.
 - **2026-03-23**: MVP-2 spec approved (`specs/mvp-2-spec.md`). 12 acceptance criteria. Architecture: frozen ConvNeXt-Tiny (vision, 768-d) + frozen all-MiniLM-L6-v2 (text, 384-d) + trainable MLP action head (1152→256→8, ~297K params). Modifies existing files (data.py, models.py, train_imitation.py, evaluate_policy.py) with backward-compatible changes. New dependencies: torchvision, transformers.
 - **2026-03-23**: MVP-2 complete. val_acc=51.6% (AC-6 soft target not met — domain gap). collect_wood 72% (9× over MVP-1's 8%), place_table 22% (MVP-1: 84%), collect_stone 0% (MVP-1: 10%). Instruction conditioning proven for simple tasks; multi-step tasks limited by single-frame architecture. StochasticDepth bug found and fixed (ConvNeXt train mode drops residual connections in frozen backbone).
-- **2026-03-23**: Pipeline extension spec drafted (`specs/pipeline-training-stages-spec.md`). Adds stages 6 (Training), 7 (Evaluation), 8 (Acceptance Verification) to automate the gap between "code approved" and "artifacts verified." No LLM invocation — pure subprocess + JSON metrics checks.
+- **2026-03-23**: Pipeline extension spec drafted (`specs/pipeline-training-stages-spec.md`). Adds stages 6 (Produce Artifacts), 7 (Validate Artifacts), 8 (Acceptance) to automate the gap between "code approved" and "artifacts verified." No LLM invocation — pure subprocess + JSON metrics checks.
 - **2026-03-23**: 224×224 resize experiment completed (background task from earlier session). Upscaling 64×64 frames to ConvNeXt's preferred resolution improved val_acc from 51.6% to **61.0%** (passes AC-6 >60% target). Simple `torchvision.transforms.Resize(224)` in forward — no architecture change. Trade-off: ~12× more pixels, slower on CPU. This validates the spec's "try resize to 224×224" fallback suggestion. Current code/artifacts remain at 64×64; the 224×224 result is recorded as a proven improvement path.
 - **2026-03-23**: VLA quality improvements spec drafted (`specs/vla-quality-improvements-spec.md`). 10 improvement directions ranked by impact/effort. Top recommendations: (1) 224×224 resize (proven +9.4%), (2) frame stacking for temporal context, (3) unfreeze last ConvNeXt stage, (4) replace frozen ConvNeXt with trainable lightweight CNN.
 - **2026-03-23**: Architecture insight — frozen pretrained encoders must be fed at their training resolution. ConvNeXt at 64×64 collapses internal feature maps to 2×2 before pooling (4 spatial positions); at 224×224 it's 7×7 (49 positions). The 9.4% val_acc improvement is spatial scale alignment, not model capacity. Rule: always resize to training resolution for frozen encoders; trainable CNNs can use native 64×64 since they learn the right scale.
 - **2026-03-23**: Execution plan established for future sessions. Order: (1) Pipeline-ext (automate training/eval/verify stages), (2) MVP-2.1 (224×224 resize), (3) MVP-2.2 (frame stacking + wider head), (4) MVP-2.3 (domain adaptation). Each step uses the extended pipeline. Full plan documented in "Next Steps Plan" section below.
+- **2026-03-25**: Pipeline-ext implemented. Three new stages: 6 (Produce Artifacts), 7 (Validate Artifacts), 8 (Acceptance). Specs define an `## Artifact Pipeline` section with Training/Evaluation/Acceptance subsections in YAML format. Specs without this section skip stages 6-8 (backward compatible). DONE stage renamed to CODE_REVIEWED; VERIFIED is the new terminal state. Existing state files with stage=DONE are auto-mapped to CODE_REVIEWED on resume. New exit codes: 11-14 (training/evaluation/acceptance failed, artifact missing). State JSON includes training_metrics and evaluation_metrics with check results. Internal state names: ARTIFACTS_PRODUCED (stage 6), ARTIFACTS_VALIDATED (stage 7), VERIFIED (stage 8).
+- **2026-03-25**: Pipeline-ext retry loop added. Stages 6-8 use the same implementer fix-and-retry pattern as stages 3-5. On fixable failure (training crash, eval crash, acceptance failure, missing artifact) → implementer agent diagnoses and fixes code → test freeze + pytest gate enforced → restart from training. Any code fix invalidates trained artifacts, so the loop wraps all three stages and resets to CODE_REVIEWED with cleared metrics. Non-fixable errors propagate immediately. `max_revisions` cap applies. 34 unit tests in test_pipeline_stages.py (53 pipeline tests total, 122 repo-wide).
 
 ---
 
@@ -92,10 +94,10 @@ Document every significant decision here as it happens.
 | MVP-0b | Scripted policies + trajectory data | **Done** (104 tests, all passing) |
 | MVP-1 | Vision-only imitation baseline ("V" only — no text) | **Done** — val_acc=71.6%, asymmetric success (8%/84%/10%) |
 | MVP-2 | Instruction-conditioned VLA policy ("V+L→A") | **Done** — val_acc=51.6%, collect_wood 72%/place_table 22%/collect_stone 0% |
-| MVP-2.1 | 224×224 resize (proven quick win) | Planned — spec ready |
+| MVP-2.1 | 224×224 resize (proven quick win) | **Done** — val_acc=60.9%, collect_wood 48%/place_table 12%/collect_stone 0% |
 | MVP-2.2 | Frame stacking + wider head (temporal context) | Planned — spec ready |
 | MVP-2.3 | Domain adaptation (trainable CNN or unfrozen ConvNeXt) | Planned — spec ready |
-| Pipeline-ext | Training/Evaluation/Verification pipeline stages | Planned — spec ready, prerequisite for MVP-2.1+ |
+| Pipeline-ext | Artifact produce/validate/accept pipeline stages | **Done** — stages 6-8 with implementer retry loop, 34 tests passing |
 | MVP-3 | Portfolio polish | Planned |
 
 ### MVP-0a Deliverables
@@ -269,13 +271,9 @@ All specs are written and ready:
 - `specs/pipeline-training-stages-spec.md` — Pipeline extension (stages 6-8)
 - `specs/vla-quality-improvements-spec.md` — 10 improvement directions with impact/effort analysis
 
-### Step 1: Extend Pipeline (Pipeline-ext)
+### Step 1: Extend Pipeline (Pipeline-ext) — DONE
 
-**Why first:** Every subsequent improvement step involves training, evaluation, and verification. Automating this once means all future experiments are `run_pipeline.py` invocations, not manual work.
-
-**Spec:** `specs/pipeline-training-stages-spec.md`
-**Run:** `uv run python scripts/run_pipeline.py pipeline-ext --provider codex`
-**Deliverable:** Pipeline stages 6 (Training), 7 (Evaluation), 8 (Acceptance Verification) working end-to-end.
+Completed 2026-03-25. Stages 6-8 implemented in `core.py`, 29 tests in `test_pipeline_stages.py`. Specs now support `## Artifact Pipeline` section with YAML-formatted Training/Evaluation/Acceptance blocks.
 
 ### Step 2: Apply 224×224 Resize (MVP-2.1)
 
@@ -405,6 +403,28 @@ spec (human-approved) -> tests -> test review -> implement -> validate -> code r
 - When the same config value is written to multiple outputs (JSON logs, MLflow params, console), use identical types and representations everywhere.
 - Do not use `None`/null in one output and `"none"` (string) in another for the same field.
 - Define the canonical representation once and reuse it.
+
+## Rule #13: Never Manipulate sys.path or Python Environment
+
+- **Never** add `sys.path` manipulation code to production modules. No `_ensure_local_site_packages()`, no `_bootstrap.py`, no `_path.py` import helpers.
+- **Never** create files like `.python-version`, `_path.py`, `_bootstrap.py`, or `runtime.py` to work around import issues.
+- **Never** rename, move, or delete `.venv/` or any virtualenv directory.
+- If imports fail in a subprocess, the fix belongs in the **subprocess launcher** (environment variables like `PYTHONPATH`), not in the imported module's source code.
+- The pipeline's `_run_artifact_stage` handles environment isolation. Spec commands should work with the Python binary specified in the spec — no import hacks needed.
+
+## Rule #14: Never Silently Degrade Hardware Acceleration
+
+- If a spec command requires `--device cuda` and CUDA is unavailable, the command must **fail loudly**, not silently fall back to CPU.
+- **Never** add `try/except` around CUDA detection that falls back to CPU without raising.
+- **Never** remove `--device cuda` from a spec command to "fix" a CUDA error.
+- If training takes >5 minutes per epoch on expected data size, suspect CPU fallback and investigate.
+
+## Rule #15: Implementer Scope — Fix the Bug, Not the World
+
+- When the implementer agent is invoked for an artifact fix (Stage 6b), it must **only** fix the specific error reported.
+- **Never** refactor unrelated files, restructure the project, or add new utility modules during an artifact fix.
+- **Never** modify scripts (`scripts/*.py`) during an artifact fix — the error is almost always in `src/` or environment setup.
+- If the fix requires changes outside `src/`, flag it for human review instead of making the change.
 
 ---
 

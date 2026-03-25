@@ -40,9 +40,9 @@ TESTS_FROZEN      → 2
 CODE_IMPLEMENTED  → 3
 CODE_VALIDATED    → 4
 CODE_REVIEWED     → 5  (renamed from DONE)
-TRAINED           → 6  (NEW)
-EVALUATED         → 7  (NEW)
-VERIFIED          → 8  (NEW — terminal state, replaces DONE)
+ARTIFACTS_PRODUCED  → 6  (NEW)
+ARTIFACTS_VALIDATED → 7  (NEW)
+VERIFIED            → 8  (NEW — terminal state, replaces DONE)
 ```
 
 ### Spec Extensions
@@ -98,14 +98,14 @@ Specs that do **not** have an `## Artifact Pipeline` section skip stages 6-8 and
 
 ---
 
-## Stage 6: Training
+## Stage 6: Produce Artifacts
 
 **Trigger:** CODE_REVIEWED reached.
 
 **What the pipeline does:**
 
 1. Parse the spec's `## Artifact Pipeline → Training` block.
-2. Run the training `command` as a subprocess with `cwd=repo_root`.
+2. Run the `command` as a subprocess with `cwd=repo_root`.
 3. Stream stdout/stderr to the pipeline log.
 4. If the process exits non-zero → `EXIT_TRAINING_FAILED`.
 5. Verify all `required_files` exist and are non-empty.
@@ -114,17 +114,17 @@ Specs that do **not** have an `## Artifact Pipeline` section skip stages 6-8 and
    - Apply the comparison `op` against `value`.
    - Log pass/fail with the `label`.
 7. If any metrics check fails → log a warning but do NOT fail the pipeline (metrics may be soft targets). Record which checks passed/failed in the pipeline state.
-8. Save state: `TRAINED`.
+8. Save state: `ARTIFACTS_PRODUCED`.
 
-**Timeout:** Training may take hours on CPU. The pipeline should not impose a hard timeout. If the user wants one, they can wrap the pipeline invocation.
+**Timeout:** Artifact production may take hours. The pipeline should not impose a hard timeout. If the user wants one, they can wrap the pipeline invocation.
 
-**No LLM invocation.** This stage runs a deterministic script — no provider is involved.
+**On failure:** If the command crashes or required artifacts are missing, the implementer agent is invoked with the error traceback. After the fix, test freeze and pytest gate are enforced, then the pipeline restarts from artifact production (see retry loop below).
 
 ### State
 
 ```json
 {
-  "stage": "TRAINED",
+  "stage": "ARTIFACTS_PRODUCED",
   "training_metrics": {
     "best_val_acc": 0.516,
     "checks": [
@@ -136,28 +136,28 @@ Specs that do **not** have an `## Artifact Pipeline` section skip stages 6-8 and
 
 ---
 
-## Stage 7: Evaluation
+## Stage 7: Validate Artifacts
 
-**Trigger:** TRAINED reached.
+**Trigger:** ARTIFACTS_PRODUCED reached.
 
 **What the pipeline does:**
 
 1. Parse the spec's `## Artifact Pipeline → Evaluation` block.
-2. Run the evaluation `command` as a subprocess.
+2. Run the validation `command` as a subprocess.
 3. Stream stdout/stderr to the pipeline log.
 4. If the process exits non-zero → `EXIT_EVALUATION_FAILED`.
 5. Verify all `required_files` exist and are non-empty.
 6. Load `metrics_file` and run `metrics_checks` (same logic as Stage 6).
 7. Record results in pipeline state.
-8. Save state: `EVALUATED`.
+8. Save state: `ARTIFACTS_VALIDATED`.
 
-**No LLM invocation.** Deterministic script execution.
+**On failure:** Same as Stage 6 — implementer fix, then restart from artifact production.
 
 ### State
 
 ```json
 {
-  "stage": "EVALUATED",
+  "stage": "ARTIFACTS_VALIDATED",
   "evaluation_metrics": {
     "success_rates": {"collect_wood": 0.72, "place_table": 0.22, "collect_stone": 0.0},
     "checks": [
@@ -169,9 +169,9 @@ Specs that do **not** have an `## Artifact Pipeline` section skip stages 6-8 and
 
 ---
 
-## Stage 8: Acceptance Verification
+## Stage 8: Acceptance
 
-**Trigger:** EVALUATED reached.
+**Trigger:** ARTIFACTS_VALIDATED reached.
 
 **What the pipeline does:**
 
@@ -190,7 +190,21 @@ Specs that do **not** have an `## Artifact Pipeline` section skip stages 6-8 and
    ```
 6. Save state: `VERIFIED` (new terminal state).
 
-**No LLM invocation.** Pure arithmetic.
+**On failure:** If acceptance checks fail, the implementer agent is invoked with the failed checks summary. After the fix, the pipeline restarts from training (code fix invalidates all trained artifacts).
+
+---
+
+## Implementer Fix-and-Retry Loop
+
+Stages 6-8 share a single outer retry loop. On any fixable failure (EXIT_TRAINING_FAILED, EXIT_EVALUATION_FAILED, EXIT_ACCEPTANCE_FAILED, EXIT_ARTIFACT_MISSING):
+
+1. The implementer agent is invoked with the error context (last 20 lines of output, the failing command, and the error message).
+2. Test freeze is enforced (implementer must not modify frozen tests).
+3. Pytest gate runs (all tests must still pass after the fix).
+4. State resets to CODE_REVIEWED with incremented iteration and cleared metrics.
+5. The loop restarts from Stage 6 (Training).
+
+Non-fixable errors (e.g., FROZEN_TESTS_MODIFIED, TESTS_BROKE_AFTER_REVISION) propagate immediately without retry. The `max_revisions` cap applies — if the cap is reached, the last error is raised.
 
 ---
 
@@ -269,6 +283,6 @@ All three new stages log their activity to the pipeline transcript (`.pipeline-s
 
 ## Open Questions
 
-1. **Should training retry on failure?** Currently: no. One attempt, fail fast. Retries with different hyperparameters would require a more complex spec format.
+1. **Should training retry on failure?** **RESOLVED: Yes.** Stages 6-8 use the same implementer fix-and-retry loop as stages 3-5. On any fixable failure (training crash, evaluation crash, acceptance check failure, missing artifact), the implementer agent is invoked with the error context and traceback, then test freeze and pytest gate are enforced, and the pipeline restarts from training. The retry loop wraps all three stages — any code fix invalidates trained artifacts, so the loop resets to CODE_REVIEWED and clears stale metrics. Non-fixable errors (e.g., FROZEN_TESTS_MODIFIED) propagate immediately. The `max_revisions` cap applies.
 2. **Should the pipeline support multiple training runs (hyperparameter sweep)?** Currently: no. One command, one run. Hyperparameter search is out of scope.
 3. **Should metrics checks support expressions beyond simple comparisons?** Currently: only `>`, `>=`, `<`, `<=`, `==`. Complex expressions (e.g., "at least 2 of 3 tasks improve") would need a mini-DSL.

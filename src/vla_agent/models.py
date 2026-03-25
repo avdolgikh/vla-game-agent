@@ -7,6 +7,7 @@ from typing import Sequence
 import torch
 from torch import nn
 from torchvision.models import ConvNeXt_Tiny_Weights, convnext_tiny
+from torchvision.transforms import functional as TF
 
 from transformers import AutoModel, AutoTokenizer
 
@@ -169,6 +170,7 @@ class CrafterVLA(nn.Module):
             )
 
         image = image.to(self.image_mean.dtype)
+        image = TF.resize(image, [224, 224], antialias=True)
         image = (image - self.image_mean) / self.image_std
         text_embed = text_embed.to(image.device, dtype=torch.float32)
 

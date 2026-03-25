@@ -134,6 +134,36 @@ def test_crafter_vla_forward_and_shapes() -> None:
     assert actions.min() >= 0 and actions.max() < model.num_actions
 
 
+def test_crafter_vla_resizes_inputs_before_backbone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The forward pass must upscale 64x64 frames to 224x224 before the vision kernel."""
+    from torchvision.transforms import functional as TF
+
+    from vla_agent.models import CrafterVLA
+
+    original_resize = TF.resize
+    calls: list[tuple[int, tuple[int, int]]] = []
+
+    def spy(image: torch.Tensor, size, *args, **kwargs) -> torch.Tensor:
+        assert image.shape[-2:] == (64, 64)
+        if isinstance(size, int):
+            assert size == 224
+        else:
+            assert tuple(size) == (224, 224)
+        calls.append((image.shape[0], tuple(size) if not isinstance(size, int) else (size, size)))
+        return original_resize(image, size, *args, **kwargs)
+
+    monkeypatch.setattr("torchvision.transforms.functional.resize", spy)
+
+    model = CrafterVLA(pretrained=False)
+    dummy_image = torch.rand(1, 3, 64, 64)
+    dummy_text = torch.rand(1, model.text_embed_dim)
+    with torch.no_grad():
+        _ = model(dummy_image, dummy_text)
+
+    assert calls, "resize must be invoked before backbone"
+    assert calls[0][1] == (224, 224)
+
+
 def test_crafter_vla_uses_text_embeddings() -> None:
     """Different embeddings for the same frame must produce different logits."""
     from vla_agent.models import CrafterVLA
