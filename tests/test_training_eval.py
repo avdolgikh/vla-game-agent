@@ -465,6 +465,344 @@ class TestNumFramesPropagation:
         assert model_num_frames == [4]
 
 
+class TestVLACNNCLI:
+    """Verify CLI parsing honors the new vla-cnn model/policy types."""
+
+    def test_train_parser_accepts_vla_cnn_choice(self, monkeypatch, tmp_path):
+        from scripts import train_imitation as train_module
+
+        cli_args = [
+            "train_imitation.py",
+            "--data-dirs",
+            str(tmp_path / "data"),
+            "--model-type",
+            "vla-cnn",
+        ]
+        monkeypatch.setattr(sys, "argv", cli_args)
+        parsed = train_module.parse_args()
+        assert parsed.model_type == "vla-cnn"
+
+    def test_eval_parser_accepts_vla_cnn_choice(self, monkeypatch, tmp_path):
+        import scripts.evaluate_policy as eval_module
+
+        cli_args = [
+            "evaluate_policy.py",
+            "--model",
+            str(tmp_path / "model.pt"),
+            "--policy-type",
+            "vla-cnn",
+        ]
+        monkeypatch.setattr(sys, "argv", cli_args)
+        parsed = eval_module.parse_args()
+        assert parsed.policy_type == "vla-cnn"
+
+
+class TestVLACNNModelType:
+    """Unit tests for the new vla-cnn CLI path."""
+
+    def test_initialize_model_vla_cnn_constructs_cnn_backbone(self, monkeypatch):
+        from scripts import train_imitation as train_module
+
+        constructed: list[tuple[str, int]] = []
+
+        class DummyVLA(torch.nn.Module):
+            def __init__(
+                self,
+                num_actions: int,
+                *,
+                pretrained: bool = True,
+                num_frames: int = 1,
+                vision_type: str = "convnext",
+            ):
+                super().__init__()
+                constructed.append((vision_type, num_frames))
+                self.param = torch.nn.Parameter(torch.tensor(0.0))
+                self.num_actions = num_actions
+                self.action_head = torch.nn.Linear(1, 1)
+
+            def forward(self, image: torch.Tensor, text_embed: torch.Tensor) -> torch.Tensor:
+                batch = image.shape[0]
+                return torch.zeros(batch, self.num_actions, dtype=torch.float32)
+
+        monkeypatch.setattr(train_module, "CrafterVLA", DummyVLA)
+
+        model, optimizer = train_module._initialize_model(
+            "vla-cnn",
+            NUM_ACTIONS,
+            torch.device("cpu"),
+            lr=1e-3,
+            num_frames=4,
+        )
+
+        assert constructed == [("cnn", 4)]
+        assert len(optimizer.param_groups) == 1
+        params = optimizer.param_groups[0]["params"]
+        assert params and params[0] is model.param
+
+    def test_load_policy_vla_cnn_uses_checkpoint_metadata(self, monkeypatch, tmp_path):
+        import scripts.evaluate_policy as eval_module
+
+        model_path = tmp_path / "vla_cnn.pt"
+        model_path.write_bytes(b"")
+        checkpoint = {
+            "state_dict": {"weights": torch.zeros(1)},
+            "metadata": {"num_frames": 3},
+        }
+
+        def fake_load(path, *args, **kwargs):
+            assert Path(path).resolve() == model_path.resolve()
+            return checkpoint
+
+        monkeypatch.setattr(eval_module.torch, "load", fake_load)
+
+        constructed: list[tuple[str, int]] = []
+
+        class DummyVLA(torch.nn.Module):
+            def __init__(
+                self,
+                num_actions: int,
+                *,
+                pretrained: bool = True,
+                num_frames: int = 1,
+                vision_type: str = "convnext",
+            ):
+                super().__init__()
+                constructed.append((vision_type, num_frames))
+                self.num_actions = num_actions
+
+            def load_state_dict(self, state):
+                pass
+
+            def forward(self, image: torch.Tensor, text_embed: torch.Tensor) -> torch.Tensor:
+                batch = image.shape[0]
+                return torch.zeros(batch, self.num_actions, dtype=torch.float32)
+
+        monkeypatch.setattr(eval_module, "CrafterVLA", DummyVLA)
+
+        model, metadata, num_frames = eval_module._load_policy(
+            "vla-cnn",
+            model_path,
+            torch.device("cpu"),
+            requested_num_frames=5,
+        )
+
+        assert constructed == [("cnn", 3)]
+        assert num_frames == 3
+        assert metadata == checkpoint["metadata"]
+
+    def test_training_records_vision_type_metadata_for_vla_cnn(self, monkeypatch, tmp_path):
+        """Checkpoint metadata must include vision_type when training vla-cnn."""
+        from scripts import train_imitation as train_module
+
+        saved_metadata: list[dict[str, object]] = []
+
+        def fake_save(payload, *_, **__):
+            if isinstance(payload, dict) and "metadata" in payload:
+                saved_metadata.append(payload["metadata"])
+
+        monkeypatch.setattr(train_module.torch, "save", fake_save)
+
+        class DummyDataset:
+            def __init__(self, *_, **__):
+                self.num_actions = NUM_ACTIONS
+
+            def unique_instructions(self) -> list[str]:
+                return []
+
+            def action_counts(self) -> np.ndarray:
+                return np.ones(NUM_ACTIONS, dtype=np.int32)
+
+        class DummyModel(torch.nn.Module):
+            def __init__(self, num_actions: int):
+                super().__init__()
+                self.num_actions = num_actions
+                self.param = torch.nn.Parameter(torch.zeros(1))
+                self.action_head = torch.nn.Linear(1, 1)
+
+            def forward(self, image: torch.Tensor, text_embed: torch.Tensor) -> torch.Tensor:
+                batch = image.shape[0]
+                return torch.zeros(batch, self.num_actions, dtype=torch.float32)
+
+        def fake_initialize_model(model_type, num_actions, device, lr, num_frames):
+            assert model_type == "vla-cnn"
+            model = DummyModel(num_actions)
+            optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+            return model.to(device), optimizer
+
+        def fake_parse_args() -> argparse.Namespace:
+            return argparse.Namespace(
+                data_dirs=[str(tmp_path / "data")],
+                output_dir=str(tmp_path / "model_out"),
+                epochs=1,
+                batch_size=1,
+                lr=1e-3,
+                val_fraction=0.0,
+                seed=42,
+                device="cpu",
+                experiment_name="vision_type_meta",
+                model_type="vla-cnn",
+                class_weights=False,
+                no_mlflow=True,
+                num_frames=4,
+            )
+
+        monkeypatch.setattr(train_module, "TrajectoryDataset", DummyDataset)
+        monkeypatch.setattr(train_module, "_initialize_model", fake_initialize_model)
+        monkeypatch.setattr(train_module, "_make_dataloaders", lambda *_, **__: ([], [], 0, 0))
+        monkeypatch.setattr(train_module, "_train_one_epoch", lambda *_, **__: 0.0)
+        monkeypatch.setattr(train_module, "_evaluate", lambda *_, **__: (0.0, 0.0))
+        monkeypatch.setattr(
+            train_module, "_build_instruction_support", lambda *_, **__: (None, None)
+        )
+        monkeypatch.setattr(train_module, "parse_args", fake_parse_args)
+
+        (tmp_path / "data").mkdir()
+
+        train_module.train()
+
+        assert saved_metadata, "Training should save a checkpoint with metadata"
+        assert any(meta.get("vision_type") == "cnn" for meta in saved_metadata), (
+            f"Expected vision_type='cnn' in metadata, got {saved_metadata}"
+        )
+
+    def test_training_allows_vla_cnn_num_frames_greater_than_one(self, tmp_path, monkeypatch):
+        from argparse import Namespace
+        from scripts import train_imitation as train_module
+
+        dataset_frame_counts: list[int] = []
+        initializer_calls: list[tuple[str, int]] = []
+
+        class DummyDataset:
+            def __init__(self, data_dirs, transform=None, *, num_frames: int = 1):
+                dataset_frame_counts.append(num_frames)
+                self.num_actions = NUM_ACTIONS
+
+            def unique_instructions(self) -> list[str]:
+                return []
+
+            def action_counts(self) -> np.ndarray:
+                return np.ones(NUM_ACTIONS, dtype=np.int32)
+
+        class DummyModel(torch.nn.Module):
+            def __init__(self, num_actions: int):
+                super().__init__()
+                self.num_actions = num_actions
+                self.param = torch.nn.Parameter(torch.zeros(1))
+
+            def forward(
+                self, image: torch.Tensor, text_embed: torch.Tensor | None = None
+            ) -> torch.Tensor:
+                batch = image.shape[0]
+                return torch.zeros(batch, self.num_actions, dtype=torch.float32)
+
+        def fake_initialize_model(model_type, num_actions, device, lr, num_frames):
+            initializer_calls.append((model_type, num_frames))
+            assert model_type == "vla-cnn"
+            assert num_frames == 4
+            model = DummyModel(num_actions)
+            optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+            return model.to(device), optimizer
+
+        def fake_parse_args() -> Namespace:
+            return Namespace(
+                data_dirs=[str(tmp_path / "data_dir")],
+                output_dir=str(tmp_path / "model_out"),
+                epochs=1,
+                batch_size=1,
+                lr=1e-3,
+                val_fraction=0.0,
+                seed=42,
+                device="cpu",
+                experiment_name="vla_cnn_frames",
+                model_type="vla-cnn",
+                class_weights=False,
+                no_mlflow=True,
+                num_frames=4,
+            )
+
+        monkeypatch.setattr(train_module, "TrajectoryDataset", DummyDataset)
+        monkeypatch.setattr(train_module, "_make_dataloaders", lambda *_, **__: ([], [], 0, 0))
+        monkeypatch.setattr(train_module, "_initialize_model", fake_initialize_model)
+        monkeypatch.setattr(
+            train_module,
+            "_make_loss",
+            lambda dataset, device, use_class_weights: torch.nn.CrossEntropyLoss(),
+        )
+        monkeypatch.setattr(
+            train_module, "_build_instruction_support", lambda *_, **__: (None, None)
+        )
+        monkeypatch.setattr(train_module, "_train_one_epoch", lambda *_, **__: 0.0)
+        monkeypatch.setattr(train_module, "_evaluate", lambda *_, **__: (0.0, 0.0))
+        monkeypatch.setattr(train_module, "_maybe_start_mlflow", lambda *_, **__: None)
+        monkeypatch.setattr(train_module, "_log_mlflow_params", lambda *_, **__: None)
+        monkeypatch.setattr(train_module, "_log_mlflow_metrics", lambda *_, **__: None)
+        monkeypatch.setattr(train_module, "_log_mlflow_artifacts", lambda *_, **__: None)
+        monkeypatch.setattr(train_module, "_end_mlflow_run", lambda *_, **__: None)
+        monkeypatch.setattr(train_module.torch, "save", lambda *_, **__: None)
+        monkeypatch.setattr(train_module, "parse_args", fake_parse_args)
+
+        (tmp_path / "data_dir").mkdir()
+
+        train_module.train()
+
+        assert dataset_frame_counts == [4]
+        assert initializer_calls == [("vla-cnn", 4)]
+
+    def test_load_policy_prefers_metadata_vision_type(self, monkeypatch, tmp_path):
+        """Eval should prefer metadata-provided vision_type over CLI defaults."""
+        import scripts.evaluate_policy as eval_module
+
+        model_path = tmp_path / "vla_cnn_meta.pt"
+        model_path.write_bytes(b"")
+        checkpoint = {
+            "state_dict": {"weights": torch.zeros(1)},
+            "metadata": {"vision_type": "cnn", "num_frames": 2},
+        }
+
+        def fake_load(path, *args, **kwargs):
+            assert Path(path).resolve() == model_path.resolve()
+            return checkpoint
+
+        monkeypatch.setattr(eval_module.torch, "load", fake_load)
+
+        constructed: list[tuple[str, int]] = []
+
+        class DummyVLA(torch.nn.Module):
+            def __init__(
+                self,
+                num_actions: int,
+                *,
+                pretrained: bool = True,
+                num_frames: int = 1,
+                vision_type: str = "convnext",
+            ):
+                super().__init__()
+                constructed.append((vision_type, num_frames))
+                self.num_actions = num_actions
+
+            def load_state_dict(self, state):
+                pass
+
+            def forward(self, image: torch.Tensor, text_embed: torch.Tensor) -> torch.Tensor:
+                batch = image.shape[0]
+                return torch.zeros(batch, self.num_actions, dtype=torch.float32)
+
+        monkeypatch.setattr(eval_module, "CrafterVLA", DummyVLA)
+
+        model, metadata, num_frames = eval_module._load_policy(
+            "vla",
+            model_path,
+            torch.device("cpu"),
+            requested_num_frames=5,
+        )
+
+        assert constructed == [("cnn", 2)], (
+            "Metadata-provided vision_type/num_frames must override CLI defaults"
+        )
+        assert num_frames == 2
+        assert metadata == checkpoint["metadata"]
+
+
 # ---------------------------------------------------------------------------
 # AC-10: MLflow tracking (2 consolidated tests)
 # ---------------------------------------------------------------------------

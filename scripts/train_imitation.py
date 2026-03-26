@@ -32,7 +32,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--experiment-name", type=str, default="mvp1")
     parser.add_argument(
         "--model-type",
-        choices=["cnn", "vla"],
+        choices=["cnn", "vla", "vla-cnn"],
         default="cnn",
         help="Model architecture to train",
     )
@@ -44,7 +44,7 @@ def parse_args() -> argparse.Namespace:
         "--num-frames",
         type=int,
         default=1,
-        help="Number of stacked frames per sample (VLA only)",
+        help="Number of stacked frames per sample (VLA variants only)",
     )
     return parser.parse_args()
 
@@ -248,6 +248,15 @@ def _initialize_model(
             device
         )
         optimizer = torch.optim.Adam(model.action_head.parameters(), lr=lr)
+    elif model_type == "vla-cnn":
+        model = CrafterVLA(
+            num_actions=num_actions,
+            pretrained=False,
+            num_frames=num_frames,
+            vision_type="cnn",
+        ).to(device)
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
+        optimizer = torch.optim.Adam(trainable_params, lr=lr)
     else:
         raise ValueError(f"Unsupported model type: {model_type}")
     return model, optimizer
@@ -258,7 +267,7 @@ def _build_instruction_support(
     device: torch.device,
     dataset: TrajectoryDataset,
 ) -> tuple[InstructionEncoder | None, dict[str, torch.Tensor] | None]:
-    if model_type != "vla":
+    if model_type not in {"vla", "vla-cnn"}:
         return None, None
     encoder = InstructionEncoder(device=device)
     cache: dict[str, torch.Tensor] = {}
@@ -303,16 +312,18 @@ def _forward_model(
 ) -> torch.Tensor:
     if model_type == "cnn":
         return model(obs)
-    instructions = batch.get("instruction")
-    if instructions is None:
-        raise RuntimeError("Batch missing 'instruction' field required for VLA training.")
-    text_embeddings = _batch_text_embeddings(
-        instructions,
-        instruction_cache,
-        instruction_encoder,
-        device,
-    )
-    return model(obs, text_embeddings)
+    if model_type in {"vla", "vla-cnn"}:
+        instructions = batch.get("instruction")
+        if instructions is None:
+            raise RuntimeError("Batch missing 'instruction' field required for VLA training.")
+        text_embeddings = _batch_text_embeddings(
+            instructions,
+            instruction_cache,
+            instruction_encoder,
+            device,
+        )
+        return model(obs, text_embeddings)
+    raise ValueError(f"Unsupported model type: {model_type}")
 
 
 def train() -> None:
@@ -322,10 +333,11 @@ def train() -> None:
 
     if args.num_frames < 1:
         raise ValueError("--num-frames must be >= 1.")
-    if args.model_type != "vla" and args.num_frames != 1:
-        raise ValueError("--num-frames > 1 is only supported for --model-type vla.")
+    vla_like = args.model_type in {"vla", "vla-cnn"}
+    if not vla_like and args.num_frames != 1:
+        raise ValueError("--num-frames > 1 is only supported for VLA model types.")
 
-    dataset_num_frames = args.num_frames if args.model_type == "vla" else 1
+    dataset_num_frames = args.num_frames if vla_like else 1
     dataset = TrajectoryDataset(data_dirs=args.data_dirs, num_frames=dataset_num_frames)
     train_loader, val_loader, num_train, num_val = _make_dataloaders(
         dataset,
@@ -369,15 +381,20 @@ def train() -> None:
         "data_dirs": json.dumps([str(Path(d)) for d in args.data_dirs]),
         "num_frames": dataset_num_frames,
     }
+    if args.model_type == "vla":
+        params["vision_type"] = "convnext"
+    elif args.model_type == "vla-cnn":
+        params["vision_type"] = "cnn"
     best_val_acc = -1.0
     best_epoch = 0
     epoch_records: list[dict[str, Any]] = []
     checkpoint_metadata: dict[str, Any] | None = None
-    if args.model_type == "vla":
+    if vla_like:
         checkpoint_metadata = {
             "model_type": args.model_type,
             "num_actions": dataset.num_actions,
             "num_frames": dataset_num_frames,
+            "vision_type": "cnn" if args.model_type == "vla-cnn" else "convnext",
         }
 
     try:

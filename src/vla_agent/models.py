@@ -110,7 +110,7 @@ class InstructionEncoder:
 
 
 class CrafterVLA(nn.Module):
-    """Fuse frozen ConvNeXt vision embeddings with precomputed text embeddings."""
+    """Fuse visual embeddings with instruction embeddings for Crafter actions."""
 
     def __init__(
         self,
@@ -118,32 +118,57 @@ class CrafterVLA(nn.Module):
         num_actions: int = 8,
         pretrained: bool = True,
         num_frames: int = 1,
+        vision_type: str = "convnext",
     ) -> None:
         super().__init__()
         if num_frames < 1:
             raise ValueError("num_frames must be >= 1.")
+        normalized_type = vision_type.lower()
+        if normalized_type not in {"convnext", "cnn"}:
+            raise ValueError(f"Unsupported vision_type '{vision_type}'.")
         self.text_embed_dim = text_embed_dim
         self.num_actions = num_actions
         self.num_frames = int(num_frames)
-        weights = ConvNeXt_Tiny_Weights.IMAGENET1K_V1 if pretrained else None
-        backbone = convnext_tiny(weights=weights)
-        self.vision_backbone = backbone.features
-        self.vision_avgpool = backbone.avgpool
-        self.vision_norm = backbone.classifier[0]
-        self.vision_dim = 768
-        self._freeze_module(self.vision_backbone)
-        self._freeze_module(self.vision_norm)
-        self.action_head = nn.Sequential(
-            nn.Linear(self.vision_dim + text_embed_dim, 512),
-            nn.ReLU(),
-            nn.Linear(512, 256),
-            nn.ReLU(),
-            nn.Linear(256, num_actions),
-        )
-        mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(1, 3, 1, 1)
-        std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(1, 3, 1, 1)
-        self.register_buffer("image_mean", mean)
-        self.register_buffer("image_std", std)
+        self.vision_type = normalized_type
+
+        if self.vision_type == "convnext":
+            weights = ConvNeXt_Tiny_Weights.IMAGENET1K_V1 if pretrained else None
+            backbone = convnext_tiny(weights=weights)
+            self.vision_backbone = backbone.features
+            self.vision_avgpool = backbone.avgpool
+            self.vision_norm = backbone.classifier[0]
+            self.vision_dim = 768
+            self._freeze_module(self.vision_backbone)
+            self._freeze_module(self.vision_norm)
+            self.action_head = nn.Sequential(
+                nn.Linear(self.vision_dim + text_embed_dim, 512),
+                nn.ReLU(),
+                nn.Linear(512, 256),
+                nn.ReLU(),
+                nn.Linear(256, num_actions),
+            )
+            mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(1, 3, 1, 1)
+            std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(1, 3, 1, 1)
+            self.register_buffer("image_mean", mean)
+            self.register_buffer("image_std", std)
+        else:
+            self.vision_cnn = nn.Sequential(
+                nn.Conv2d(3, 32, kernel_size=8, stride=4, padding=0),
+                nn.ReLU(),
+                nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=0),
+                nn.ReLU(),
+                nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=0),
+                nn.ReLU(),
+                nn.Flatten(),
+                nn.Linear(64 * 4 * 4, 256),
+                nn.ReLU(),
+            )
+            self.vision_dim = 256
+            self.action_head = nn.Sequential(
+                nn.Linear(self.vision_dim + text_embed_dim, 256),
+                nn.ReLU(),
+                nn.Linear(256, num_actions),
+            )
 
     @staticmethod
     def _freeze_module(module: nn.Module) -> None:
@@ -159,9 +184,10 @@ class CrafterVLA(nn.Module):
         mode so features are deterministic and noise-free.
         """
         super().train(mode)
-        # Always keep frozen vision components in eval mode.
-        self.vision_backbone.eval()
-        self.vision_norm.eval()
+        if self.vision_type == "convnext":
+            # Always keep frozen vision components in eval mode.
+            self.vision_backbone.eval()
+            self.vision_norm.eval()
         return self
 
     def forward(self, image: torch.Tensor, text_embed: torch.Tensor) -> torch.Tensor:
@@ -191,16 +217,20 @@ class CrafterVLA(nn.Module):
             batch_size = image.shape[0]
             frame_count = 1
 
-        image = image.to(self.image_mean.dtype)
-        image = TF.resize(image, [224, 224], antialias=True)
-        image = (image - self.image_mean) / self.image_std
         text_embed = text_embed.to(image.device, dtype=torch.float32)
+        if self.vision_type == "convnext":
+            image = image.to(self.image_mean.dtype)
+            image = TF.resize(image, [224, 224], antialias=True)
+            image = (image - self.image_mean) / self.image_std
+            with torch.no_grad():
+                vision = self.vision_backbone(image)
+                vision = self.vision_avgpool(vision)
+                vision = self.vision_norm(vision)
+            vision = torch.flatten(vision, 1)
+        else:
+            image = image.to(dtype=torch.float32)
+            vision = self.vision_cnn(image)
 
-        with torch.no_grad():
-            vision = self.vision_backbone(image)
-            vision = self.vision_avgpool(vision)
-            vision = self.vision_norm(vision)
-        vision = torch.flatten(vision, 1)
         if stacked_input:
             vision = vision.view(batch_size, frame_count, self.vision_dim)
             vision = vision.mean(dim=1)

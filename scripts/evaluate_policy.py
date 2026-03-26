@@ -23,7 +23,7 @@ INSTRUCTION_TASK_MAP = {
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate an imitation policy in Crafter.")
     parser.add_argument("--model", type=str, required=True, help="Path to model checkpoint (.pt)")
-    parser.add_argument("--policy-type", choices=["cnn", "vla"], default="cnn")
+    parser.add_argument("--policy-type", choices=["cnn", "vla", "vla-cnn"], default="cnn")
     parser.add_argument("--num-episodes", type=int, default=50)
     parser.add_argument("--max-steps", type=int, default=300)
     parser.add_argument("--base-seed", type=int, default=1000)
@@ -33,7 +33,7 @@ def parse_args() -> argparse.Namespace:
         "--num-frames",
         type=int,
         default=1,
-        help="Number of stacked frames per observation (VLA only)",
+        help="Number of stacked frames per observation (VLA variants only)",
     )
     return parser.parse_args()
 
@@ -71,16 +71,19 @@ def _load_policy(
     if policy_type == "cnn":
         num_frames = 1
         model = CrafterCNN(num_actions=CrafterEnv.num_actions)
-    elif policy_type == "vla":
+    elif policy_type in {"vla", "vla-cnn"}:
         metadata_frames = metadata.get("num_frames")
-        if metadata_frames is not None:
-            num_frames = int(metadata_frames)
+        num_frames = int(metadata_frames) if metadata_frames is not None else requested_num_frames
+        metadata_vision = metadata.get("vision_type")
+        if isinstance(metadata_vision, str):
+            vision_type = metadata_vision.lower()
         else:
-            num_frames = requested_num_frames
+            vision_type = "cnn" if policy_type == "vla-cnn" else "convnext"
         model = CrafterVLA(
             num_actions=CrafterEnv.num_actions,
             pretrained=False,
             num_frames=num_frames,
+            vision_type=vision_type,
         )
     else:
         raise ValueError(f"Unsupported policy type: {policy_type}")
@@ -126,7 +129,8 @@ def _run_episode(
         total_reward = 0.0
         num_steps = 0
         frame_buffer: deque[torch.Tensor] | None = None
-        if policy_type == "vla" and num_frames > 1:
+        is_vla_policy = policy_type in {"vla", "vla-cnn"}
+        if is_vla_policy and num_frames > 1:
             frame_buffer = _init_frame_buffer(num_frames, device)
 
         for _ in range(max_steps):
@@ -140,10 +144,12 @@ def _run_episode(
             with torch.no_grad():
                 if policy_type == "cnn":
                     logits = model(model_obs)
-                else:
+                elif is_vla_policy:
                     if text_embed is None:
                         raise RuntimeError("VLA policies require a text embedding.")
                     logits = model(model_obs, text_embed)
+                else:
+                    raise ValueError(f"Unsupported policy type: {policy_type}")
             action = int(logits.argmax(dim=1).item())
             obs, reward, terminated, truncated, info = env.step(action)
             total_reward += float(reward)
@@ -253,7 +259,7 @@ def evaluate() -> None:
                     seed,
                     args.max_steps,
                     device,
-                    "vla",
+                    args.policy_type,
                     num_frames=effective_num_frames,
                     text_embed=text_embed,
                 )
@@ -293,8 +299,8 @@ def evaluate() -> None:
 
         results = {
             "model": str(model_path),
-            "model_type": "vla",
-            "policy_type": "vla",
+            "model_type": metadata.get("model_type", args.policy_type),
+            "policy_type": args.policy_type,
             "num_frames": effective_num_frames,
             "num_episodes": total_episodes,
             "num_episodes_per_instruction": args.num_episodes,

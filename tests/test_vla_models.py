@@ -76,6 +76,17 @@ class _FakeModel:
         return self
 
 
+class _FakeModelWithParams(_FakeModel):
+    """Fake transformers model that exposes a mutable Parameter for grad checks."""
+
+    def __init__(self, hidden_size: int = 384) -> None:
+        super().__init__(hidden_size=hidden_size)
+        self.param = nn.Parameter(torch.zeros(1, dtype=torch.float32), requires_grad=True)
+
+    def parameters(self) -> tuple[nn.Parameter, ...]:
+        return (self.param,)
+
+
 def _patch_transformers(monkeypatch: pytest.MonkeyPatch, model: _FakeModel) -> None:
     """Patch transformers.AutoTokenizer/AutoModel to use our stubs."""
 
@@ -112,6 +123,22 @@ def test_instruction_encoder_embeds_text(monkeypatch: pytest.MonkeyPatch) -> Non
 
     similarity = F.cosine_similarity(batch[0:1], batch[1:2])
     assert float(similarity) < 1.0, "Different instructions should produce different embeddings"
+
+
+def test_instruction_encoder_parameters_remain_frozen_for_vla_cnn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Instruction encoder params must stay frozen even when training vla-cnn."""
+    fake_model = _FakeModelWithParams()
+    _patch_transformers(monkeypatch, fake_model)
+
+    from vla_agent.models import InstructionEncoder
+
+    encoder = InstructionEncoder(device="cpu")
+    assert encoder.model is fake_model
+    assert all(not param.requires_grad for param in encoder.model.parameters()), (
+        "Text encoder params must remain frozen"
+    )
 
 
 def test_crafter_vla_forward_and_shapes() -> None:
@@ -363,3 +390,128 @@ def test_crafter_vla_save_load(tmp_path: Path) -> None:
     torch.testing.assert_close(
         original, restored, msg="Loaded CrafterVLA must match outputs of the original"
     )
+
+
+def test_crafter_vla_cnn_constructs_trainable_cnn_and_action_head() -> None:
+    """vision_type='cnn' must build the CNN backbone and the smaller action head."""
+    from vla_agent.models import CrafterVLA
+
+    model = CrafterVLA(pretrained=False, vision_type="cnn", num_frames=1)
+    assert getattr(model, "vision_type", None) == "cnn"
+    assert model.vision_dim == 256
+    assert hasattr(model, "vision_cnn"), "CNN backbone must be registered"
+
+    cnn_params = list(model.vision_cnn.parameters())
+    assert cnn_params, "CNN backbone must expose parameters"
+    assert all(p.requires_grad for p in cnn_params), "CNN must remain trainable"
+
+    linear_layers = [layer for layer in model.action_head if isinstance(layer, torch.nn.Linear)]
+    assert len(linear_layers) == 2
+    assert linear_layers[0].in_features == model.vision_dim + model.text_embed_dim
+    assert linear_layers[0].out_features == 256
+    assert linear_layers[1].in_features == 256
+    assert linear_layers[1].out_features == model.num_actions
+
+
+def test_crafter_vla_cnn_skips_imagenet_resize(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CNN vision_type must not call torchvision resize (no ImageNet preprocessing)."""
+    from torchvision.transforms import functional as TF
+
+    from vla_agent.models import CrafterVLA
+
+    def fail_resize(*args, **kwargs) -> torch.Tensor:
+        raise AssertionError("resize() must not be invoked for vision_type='cnn'")
+
+    monkeypatch.setattr(TF, "resize", fail_resize)
+
+    model = CrafterVLA(pretrained=False, vision_type="cnn")
+    dummy_image = torch.rand(1, 3, 64, 64)
+    dummy_text = torch.rand(1, model.text_embed_dim)
+    with torch.no_grad():
+        _ = model(dummy_image, dummy_text)
+
+
+def test_crafter_vla_cnn_frame_stacking_mean_pools() -> None:
+    """Frame stacking with the CNN backbone should average per-frame embeddings."""
+    from vla_agent.models import CrafterVLA
+
+    model = CrafterVLA(pretrained=False, vision_type="cnn", num_frames=4)
+
+    class _DummyCNN(torch.nn.Module):
+        def forward(self, image: torch.Tensor) -> torch.Tensor:
+            means = image.mean(dim=(1, 2, 3))
+            return means.unsqueeze(1).expand(-1, model.vision_dim)
+
+    model.vision_cnn = _DummyCNN()
+
+    recorded: list[torch.Tensor] = []
+
+    class _RecordingHead(torch.nn.Module):
+        def forward(self, fused: torch.Tensor) -> torch.Tensor:
+            recorded.append(fused[:, : model.vision_dim])
+            return torch.zeros(fused.shape[0], model.num_actions, dtype=torch.float32)
+
+    model.action_head = _RecordingHead()
+
+    frames = torch.zeros(1, 4, 3, 64, 64, dtype=torch.float32)
+    frame_values = torch.tensor([1.0, 4.0, 7.0, 10.0], dtype=torch.float32)
+    for idx, value in enumerate(frame_values):
+        frames[:, idx].fill_(value)
+
+    text_embedding = torch.zeros(1, model.text_embed_dim, dtype=torch.float32)
+    with torch.no_grad():
+        _ = model(frames, text_embedding)
+
+    assert recorded, "Recording head must be invoked"
+    vision_features = recorded[0]
+    expected_mean = frame_values.mean()
+    assert torch.allclose(vision_features, torch.full_like(vision_features, expected_mean)), (
+        "CNN features must equal the mean over the stacked frames"
+    )
+    assert not torch.allclose(
+        vision_features, torch.full_like(vision_features, frame_values[-1])
+    ), "Features must not ignore history and fallback to the last frame"
+
+
+def test_crafter_vla_cnn_backbone_matches_craftercnn_conv_structure() -> None:
+    """The CNN backbone must reuse MVP-1 kernel sizes/strides and the 1024→256 projection."""
+    from vla_agent.models import CrafterVLA
+
+    model = CrafterVLA(pretrained=False, vision_type="cnn", num_frames=1)
+    conv_layers = [layer for layer in model.vision_cnn if isinstance(layer, nn.Conv2d)]
+    expected_conv_specs = [
+        (3, 32, (8, 8), (4, 4), (0, 0)),
+        (32, 64, (4, 4), (2, 2), (0, 0)),
+        (64, 64, (3, 3), (1, 1), (0, 0)),
+    ]
+    actual_specs = [
+        (conv.in_channels, conv.out_channels, conv.kernel_size, conv.stride, conv.padding)
+        for conv in conv_layers
+    ]
+    assert actual_specs == expected_conv_specs
+
+    linear_layers = [layer for layer in model.vision_cnn if isinstance(layer, nn.Linear)]
+    assert len(linear_layers) == 1
+    projection = linear_layers[0]
+    assert projection.in_features == 64 * 4 * 4
+    assert projection.out_features == 256, (
+        "CNN projection must match CrafterCNN -> 256-d vision dim"
+    )
+
+
+def test_crafter_vla_cnn_forward_with_real_backbone_accepts_frame_stacks() -> None:
+    """Cnn-based VLA must forward stacked (B, 4, 3, 64, 64) tensors via the real backbone."""
+    from vla_agent.models import CrafterVLA
+
+    torch.manual_seed(0)
+    model = CrafterVLA(pretrained=False, vision_type="cnn", num_frames=4)
+    model.eval()
+
+    batch = 2
+    frames = torch.rand(batch, 4, 3, 64, 64, dtype=torch.float32)
+    text_embedding = torch.rand(batch, model.text_embed_dim, dtype=torch.float32)
+    with torch.no_grad():
+        logits = model(frames, text_embedding)
+
+    assert logits.shape == (batch, model.num_actions)
+    assert not torch.isnan(logits).any()
