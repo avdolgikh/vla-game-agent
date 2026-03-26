@@ -9,6 +9,7 @@ artifacts/
 .ruff_cache/
 .pytest_cache/
 *.mp4
+!docs/demo/**/*.mp4
 .env
 .claude/settings.local.json
 .pipeline-state/

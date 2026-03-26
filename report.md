@@ -92,9 +92,9 @@ Each milestone tested a specific hypothesis. The progression forms a clean ablat
 | MVP-2.2 | + 4-frame stacking | 55.0% | 58% | 22% | 0% |
 | **MVP-2.3** | **Trainable CNN + text + frames** | **76.8%** | **38%** | **76%** | **6%** |
 
-![Training curves across milestones](artifacts/figures/training_curves.png)
+![Training curves across milestones](docs/images/training_curves.png)
 
-![Per-task success rates across milestones](artifacts/figures/task_success_rates.png)
+![Per-task success rates across milestones](docs/images/task_success_rates.png)
 
 ### MVP-1: Vision-Only Baseline
 

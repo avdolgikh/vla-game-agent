@@ -39,14 +39,14 @@ Takes a game frame + a text instruction, predicts a player action. Demonstrates 
 
 The full 5-milestone experiment progression is in the [technical report](report.md).
 
-![Training curves](artifacts/figures/training_curves.png)
-![Task success rates](artifacts/figures/task_success_rates.png)
+![Training curves](docs/images/training_curves.png)
+![Task success rates](docs/images/task_success_rates.png)
 
 ---
 
 ## Demo
 
-Sample videos of the MVP-2.3 agent following different instructions are in [`artifacts/demo/mvp2.3/`](artifacts/demo/mvp2.3/).
+Sample videos of the MVP-2.3 agent following different instructions are in [`docs/demo/mvp2.3/`](docs/demo/mvp2.3/).
 
 Generate your own:
 
