@@ -82,7 +82,10 @@ Document every significant decision here as it happens.
 - **2026-03-23**: Architecture insight — frozen pretrained encoders must be fed at their training resolution. ConvNeXt at 64×64 collapses internal feature maps to 2×2 before pooling (4 spatial positions); at 224×224 it's 7×7 (49 positions). The 9.4% val_acc improvement is spatial scale alignment, not model capacity. Rule: always resize to training resolution for frozen encoders; trainable CNNs can use native 64×64 since they learn the right scale.
 - **2026-03-23**: Execution plan established for future sessions. Order: (1) Pipeline-ext (automate training/eval/verify stages), (2) MVP-2.1 (224×224 resize), (3) MVP-2.2 (frame stacking + wider head), (4) MVP-2.3 (domain adaptation). Each step uses the extended pipeline. Full plan documented in "Next Steps Plan" section below.
 - **2026-03-25**: Pipeline-ext implemented. Three new stages: 6 (Produce Artifacts), 7 (Validate Artifacts), 8 (Acceptance). Specs define an `## Artifact Pipeline` section with Training/Evaluation/Acceptance subsections in YAML format. Specs without this section skip stages 6-8 (backward compatible). DONE stage renamed to CODE_REVIEWED; VERIFIED is the new terminal state. Existing state files with stage=DONE are auto-mapped to CODE_REVIEWED on resume. New exit codes: 11-14 (training/evaluation/acceptance failed, artifact missing). State JSON includes training_metrics and evaluation_metrics with check results. Internal state names: ARTIFACTS_PRODUCED (stage 6), ARTIFACTS_VALIDATED (stage 7), VERIFIED (stage 8).
-- **2026-03-26**: MVP-3 spec created (`specs/mvp-3-spec.md`). Portfolio polish: README rewrite, architecture diagram, training curves + task success plots, demo videos for MVP-2.3, standalone pipeline documentation. Two portfolio stories: the VLA agent (ML) and the agentic TDD pipeline (engineering). No production code changes — documentation and visualization only (except `demo_policy.py` VLA support).
+- **2026-03-26**: Project retrospective. The ML side proved its thesis: language grounding enables task-specific behavior that vision-only models cannot achieve. The 5-milestone progression (MVP-1→2.3) is a clean ablation study — each step tested one hypothesis. The agent itself is a proof of concept (3 tasks, scripted data, reactive), not a deployable system. The surprise win is the agentic TDD pipeline — a full automated development lifecycle (spec → tests → review → implement → validate → review → train → evaluate → verify), provider-agnostic, self-correcting, battle-tested across 5 milestones. This is genuinely novel and has standalone portfolio/community value beyond this project.
+- **2026-03-26**: Strategic decision: after MVP-3 (polish), the ML side is complete — further VLA improvements are diminishing returns for portfolio value. The pipeline has legs: plan to extract it as a standalone open-source tool, generalize by removing project-specific code, add Gemini provider (spec exists), actualize Claude provider (may have drifted during Codex refinements). Pipeline generalization + provider expansion is the immediate next step after MVP-3.
+- **2026-03-26**: MVP-3 complete. Deliverables: README.md (concise landing page with architecture diagram, results snapshot, pipeline teaser), report.md (full technical report — VLA paradigm, 5-milestone experiment progression, key findings, pipeline story, limitations, further work), docs/agentic-pipeline.md (standalone pipeline documentation with state machine, providers, guardrails, real MVP-2.3 walkthrough), scripts/plot_results.py (training curves + task success rates plots), scripts/demo_policy.py updated for VLA support, 9 demo videos in artifacts/demo/mvp2.3/, 2 figures in artifacts/figures/. 143 tests still passing.
+- **2026-03-26**: MVP-3 spec approved (`specs/mvp-3-spec.md`). Portfolio polish: concise README (100-200 lines), detailed technical report (`report.md`, 300-500 lines), pipeline documentation (`docs/agentic-pipeline.md`), training curves + task success plots, demo videos for MVP-2.3. Two portfolio stories: the VLA agent (ML) and the agentic TDD pipeline (engineering). Both README and report include "Further work" section with two tracks (ML track, pipeline track). No production code changes — documentation and visualization only (except `demo_policy.py` VLA support).
 - **2026-03-26**: MVP-2.3 complete. Trainable CNN (vision_type="cnn") replaces frozen ConvNeXt. val_acc=76.8% (highest ever, +21.8% over MVP-2.2). place_table 76% (3.5× over MVP-2.2's 22%), collect_stone 6% (first nonzero VLA result). Domain gap confirmed as primary bottleneck — trainable CNN learns Crafter-specific features at native 64×64. Architecture: 4-frame stacking + trainable 3-conv CNN (256-d) + frozen text encoder (384-d) + 2-layer action head (640→256→8), ~504K trainable params.
 - **2026-03-25**: Pipeline-ext retry loop added. Stages 6-8 use the same implementer fix-and-retry pattern as stages 3-5. On fixable failure (training crash, eval crash, acceptance failure, missing artifact) → implementer agent diagnoses and fixes code → test freeze + pytest gate enforced → restart from training. Any code fix invalidates trained artifacts, so the loop wraps all three stages and resets to CODE_REVIEWED with cleared metrics. Non-fixable errors propagate immediately. `max_revisions` cap applies. 34 unit tests in test_pipeline_stages.py (53 pipeline tests total, 122 repo-wide).
 
@@ -100,7 +103,7 @@ Document every significant decision here as it happens.
 | MVP-2.2 | Frame stacking + wider head (temporal context) | **Done** — val_acc=55.0%, collect_wood 58%/place_table 22%/collect_stone 0% |
 | MVP-2.3 | Domain adaptation (trainable CNN replacing frozen ConvNeXt) | **Done** — val_acc=76.8%, collect_wood 38%/place_table 76%/collect_stone 6% |
 | Pipeline-ext | Artifact produce/validate/accept pipeline stages | **Done** — stages 6-8 with implementer retry loop, 34 tests passing |
-| MVP-3 | Portfolio polish | Planned |
+| MVP-3 | Portfolio polish | **Done** — README, report.md, pipeline docs, plots, 9 demo videos |
 
 ### MVP-0a Deliverables
 
@@ -401,9 +404,22 @@ Completed 2026-03-26. Trainable CNN replaces frozen ConvNeXt. val_acc=76.8% (bes
 
 **Note:** This is a documentation/visualization milestone. No changes to `src/vla_agent/`, no test changes, no training changes.
 
-### Future: Gemini Provider
+### Step 6: Pipeline Generalization (Post MVP-3)
 
-Spec exists (`specs/gemini-provider-spec.md`). Not in MVP-3 scope. Claude provider may also need actualization after recent Codex provider refinements.
+The agentic TDD pipeline is a standalone portfolio asset and potential open-source tool. After MVP-3, the priority shifts from the ML project to the pipeline itself.
+
+**What to do:**
+1. **Generalize pipeline code** — Remove project-specific assumptions from `src/vla_agent/pipeline/core.py` and providers. The pipeline should work for any repo, not just vla-game-agent. Extract into a reusable package or standalone repo.
+2. **Add Gemini provider** — Spec exists (`specs/gemini-provider-spec.md`). Straightforward adapter following the Codex provider pattern.
+3. **Actualize Claude provider** — `providers/claude.py` may have drifted during Codex provider refinements (stages 6-8 retry loop, prompt-via-stdin, encoding fixes). Verify it still works end-to-end and align with Codex provider capabilities.
+4. **Verify all providers work** — Run a simple spec through each provider (Claude, Codex, Gemini) to confirm the provider-agnostic promise is real.
+
+**Why this matters:**
+- Most "AI coding" demos are one-shot generation. A multi-stage, self-correcting pipeline with quality gates is genuinely novel.
+- Provider-agnostic design means it's not locked to one vendor — but only if all providers actually work.
+- As a standalone tool, this has community value beyond the VLA project.
+
+**ML side is complete after MVP-3.** Further VLA improvements (more tasks, RL, attention-based memory) are diminishing portfolio returns. The experiment progression tells a complete story.
 
 ---
 

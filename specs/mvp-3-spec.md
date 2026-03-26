@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft
+Approved
 
 ## Goal
 
@@ -37,21 +37,47 @@ A portfolio visitor sees a bare repo with no story.
 
 #### D-1: README rewrite
 
-Replace the current README with a comprehensive project page. Structure:
+Replace the current README with a concise project landing page. The README hooks the reader and points them deeper. Structure:
 
 1. **Header** — Project title, one-line description, badges (Python, PyTorch, License)
 2. **Hero section** — 2-3 sentence pitch. What it is, what it demonstrates.
 3. **Architecture diagram** — ASCII art showing: Frame + Instruction → [CNN] + [Text Encoder] → [Action Head] → Action. Show the VLA architecture visually.
-4. **Key results table** — Comparison across all milestones (MVP-1 through MVP-2.3) showing val_acc and per-task success rates. The central result: MVP-1 (no text) vs MVP-2.3 (text + CNN + frames) = language grounding matters.
+4. **Key results snapshot** — Compact comparison table (MVP-1 vs MVP-2.3) showing val_acc and per-task success rates. The headline: language grounding enables task-specific behavior. Link to `report.md` for the full experiment progression.
 5. **Demo section** — Embedded GIFs or links to demo videos showing the agent playing Crafter with different instructions.
 6. **Quick start** — Setup, training, evaluation commands (copy-paste ready).
 7. **Project structure** — Brief layout of `src/`, `scripts/`, `specs/`, `artifacts/`.
-8. **Agentic TDD Pipeline section** — Dedicated section explaining the pipeline as a standalone engineering contribution. State machine diagram (ASCII), provider architecture, how it works, link to `specs/agentic-pipeline.md`.
-9. **Experiment log** — Condensed version of the experiment progression: what was tried, what worked, what didn't, and why.
-10. **Honest limitations** — Single-frame reactive model, 3-task vocabulary, scripted data, no RL fine-tuning.
-11. **License**
+8. **Agentic TDD Pipeline teaser** — Short paragraph + state machine one-liner explaining the pipeline as a standalone engineering contribution. Link to `docs/agentic-pipeline.md` for the full story.
+9. **Limitations and further work** — Compact: what doesn't work yet, what directions are worth pursuing (ML track + pipeline track). Keep brief, link to report.md for detail.
+10. **License**
 
-**Length target:** 200-400 lines. Detailed enough to be informative, concise enough to read in 5 minutes.
+**Length target:** 100-200 lines. A 2-minute read that makes the reader want to explore further.
+
+#### D-1b: Technical report
+
+Create `report.md` at the repo root — the detailed technical write-up of the entire project. This is the portfolio centerpiece: a blog-post-quality document that tells the full story from problem statement to final results. Structure:
+
+1. **Introduction** — What is VLA? Why apply it to games? What does this project demonstrate?
+2. **The VLA paradigm** — How VLA differs from RL. Why language grounding matters. The "one model that follows instructions" idea. Brief comparison to robotics VLA (RT-2, Octo, OpenVLA) to show the reader understands the broader field.
+3. **Architecture** — Detailed architecture diagram (ASCII). Frame stacking, CNN backbone, text encoder, fusion, action head. Why pretrained text encoder + trainable CNN (the domain gap story).
+4. **Data** — Scripted expert policies, trajectory format, 500 episodes × 3 tasks. Why scripted data is sufficient for this scope.
+5. **Experiment progression** — The core of the report. Walk through each milestone with motivation, what changed, results, and what was learned:
+   - MVP-1: Vision-only baseline → collapses to one behavior (the problem)
+   - MVP-2: Add text conditioning → collect_wood 9× improvement (language works!)
+   - MVP-2.1: Resize to 224×224 → spatial scale alignment matters
+   - MVP-2.2: Frame stacking → temporal context helps multi-step tasks
+   - MVP-2.3: Trainable CNN → domain gap eliminated, best results
+   Include the full results table and reference the training curves + task success figures.
+6. **Key findings** — Distilled insights: domain gap is the bottleneck, val_acc is a poor proxy for task success, language grounding enables dramatically different behavior per instruction, frozen pretrained encoders need native resolution.
+7. **The agentic TDD pipeline** — How the code was built. One-command automation, 8-stage state machine, provider-agnostic design, guardrails, real example from MVP-2.3. This section positions the pipeline as a standalone engineering contribution. Link to `docs/agentic-pipeline.md` for implementation details.
+8. **Limitations** — Honest about scope: 3 tasks, scripted data, single-frame decisions (even with stacking, no real memory), no RL fine-tuning.
+9. **Further work** — Two tracks:
+   - *ML track:* More tasks/instructions, human gameplay data, attention-based temporal reasoning (replace mean pooling), RL fine-tuning on top of imitation, larger action space.
+   - *Pipeline track:* Gemini provider (spec exists), extract pipeline as standalone open-source tool, support for parallel stage execution, richer artifact validation (video generation, qualitative checks). The pipeline is a reusable contribution beyond this project.
+10. **Conclusion** — 3-4 sentences summarizing what was demonstrated.
+
+**Length target:** 300-500 lines. Detailed enough to serve as a technical blog post. Should reference figures (`artifacts/figures/`) and link to demo videos.
+
+**Tone:** Technical but accessible. A senior engineer or ML practitioner should find it credible; a curious junior developer should be able to follow the story. Avoid jargon without explanation. Be confident about achievements, honest about limitations.
 
 #### D-2: Demo videos for MVP-2.3
 
@@ -109,7 +135,8 @@ Create `docs/agentic-pipeline.md` — a standalone document explaining the pipel
 
 | File | Description |
 |------|-------------|
-| `README.md` | Complete rewrite (overwrite existing) |
+| `README.md` | Concise landing page (overwrite existing) |
+| `report.md` | Technical report — full project story, experiment progression, findings |
 | `docs/agentic-pipeline.md` | Pipeline documentation for external readers |
 | `artifacts/figures/training_curves.png` | val_acc comparison plot |
 | `artifacts/figures/task_success_rates.png` | Per-task success rate bar chart |
@@ -135,11 +162,15 @@ Create `docs/agentic-pipeline.md` — a standalone document explaining the pipel
 
 ### AC-1: README completeness
 
-`README.md` contains all sections listed in D-1. Architecture diagram is present as ASCII art. Key results table shows all milestones with val_acc and per-task success rates.
+`README.md` contains all sections listed in D-1: header, hero, architecture diagram (ASCII), results snapshot table, demo links, quick start, project structure, pipeline teaser, limitations, license. 100-200 lines.
 
 ### AC-2: README clarity
 
-A reader unfamiliar with the project can understand from the README alone: (a) what VLA means in this context, (b) what the agent does, (c) how results progressed from MVP-1 to MVP-2.3, (d) that the pipeline is a separate engineering contribution.
+A reader unfamiliar with the project can understand from the README alone: (a) what VLA means in this context, (b) what the agent does, (c) headline results (MVP-1 vs MVP-2.3), (d) that the pipeline is a separate engineering contribution. The README links to `report.md` for the full story.
+
+### AC-2b: Technical report
+
+`report.md` exists at repo root and covers all sections listed in D-1b: introduction, VLA paradigm, architecture, data, experiment progression (all 5 milestones with results), key findings, pipeline story, limitations/future work, conclusion. 300-500 lines. References figures from `artifacts/figures/`. Reads as a standalone technical blog post.
 
 ### AC-3: Demo videos generated
 
@@ -188,9 +219,19 @@ The README should present this as a first-class project contribution, not a foot
 
 Per the initial spec's guidance: this is an "instruction-conditioned visual game agent" / "tiny VLA-style game bot." Not a foundation model, not a general game-playing agent, not a robotics system. The README should be honest about scope while being confident about what was achieved.
 
-### On the Gemini provider
+### On the pipeline as a separate portfolio piece
 
-The Gemini provider spec (`specs/gemini-provider-spec.md`) exists but is not part of MVP-3 scope. It can be mentioned in the README as a planned extension. The Claude provider (`providers/claude.py`) may need actualization after recent Codex provider refinements — this is also out of MVP-3 scope but worth noting for future work.
+The pipeline is planned to become a standalone project after MVP-3. Immediate next steps (not in MVP-3 scope, but the "Further work" section should reference them):
+1. Generalize pipeline code — remove vla-game-agent-specific assumptions from `core.py` and providers
+2. Add Gemini provider — spec exists (`specs/gemini-provider-spec.md`)
+3. Actualize Claude provider — `providers/claude.py` may have drifted during Codex provider refinements
+4. Extract as standalone open-source tool
+
+The report's "Further work" section should frame this as the pipeline's own roadmap, separate from the ML roadmap. The README teaser should mention it's designed to be reusable.
+
+### On what was actually achieved (framing guidance)
+
+The ML project proved its thesis: language grounding enables task-specific behavior. The 5-milestone progression is a clean ablation study. The agent is a proof of concept (3 tasks, scripted data, reactive) — honest about scope. The pipeline is the surprise win: a multi-stage self-correcting TDD pipeline with quality gates, genuinely novel, with standalone community value. Both stories deserve equal weight in the report.
 
 ### On matplotlib availability
 
