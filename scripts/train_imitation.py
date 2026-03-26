@@ -40,6 +40,12 @@ def parse_args() -> argparse.Namespace:
         "--class-weights", action="store_true", help="Use inverse-frequency class weights"
     )
     parser.add_argument("--no-mlflow", action="store_true", help="Disable MLflow tracking")
+    parser.add_argument(
+        "--num-frames",
+        type=int,
+        default=1,
+        help="Number of stacked frames per sample (VLA only)",
+    )
     return parser.parse_args()
 
 
@@ -53,6 +59,14 @@ def _resolve_device(arg: str) -> torch.device:
     if arg == "cpu":
         return torch.device("cpu")
     raise ValueError(f"Unknown device option: {arg}")
+
+
+def _checkpoint_payload(model: nn.Module, metadata: dict[str, Any] | None) -> dict[str, Any] | dict:
+    """Wrap a model state dict with metadata when provided."""
+    state_dict = model.state_dict()
+    if not metadata:
+        return state_dict
+    return {"state_dict": state_dict, "metadata": dict(metadata)}
 
 
 def _set_seed(seed: int, device: torch.device) -> None:
@@ -224,12 +238,15 @@ def _initialize_model(
     num_actions: int,
     device: torch.device,
     lr: float,
+    num_frames: int,
 ) -> tuple[nn.Module, torch.optim.Optimizer]:
     if model_type == "cnn":
         model = CrafterCNN(num_actions=num_actions).to(device)
         optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     elif model_type == "vla":
-        model = CrafterVLA(num_actions=num_actions, pretrained=True).to(device)
+        model = CrafterVLA(num_actions=num_actions, pretrained=True, num_frames=num_frames).to(
+            device
+        )
         optimizer = torch.optim.Adam(model.action_head.parameters(), lr=lr)
     else:
         raise ValueError(f"Unsupported model type: {model_type}")
@@ -303,7 +320,13 @@ def train() -> None:
     device = _resolve_device(args.device)
     _set_seed(args.seed, device)
 
-    dataset = TrajectoryDataset(data_dirs=args.data_dirs)
+    if args.num_frames < 1:
+        raise ValueError("--num-frames must be >= 1.")
+    if args.model_type != "vla" and args.num_frames != 1:
+        raise ValueError("--num-frames > 1 is only supported for --model-type vla.")
+
+    dataset_num_frames = args.num_frames if args.model_type == "vla" else 1
+    dataset = TrajectoryDataset(data_dirs=args.data_dirs, num_frames=dataset_num_frames)
     train_loader, val_loader, num_train, num_val = _make_dataloaders(
         dataset,
         val_fraction=args.val_fraction,
@@ -315,6 +338,7 @@ def train() -> None:
         dataset.num_actions,
         device,
         args.lr,
+        dataset_num_frames,
     )
     criterion = _make_loss(dataset, device, args.class_weights)
     instruction_encoder, instruction_cache = _build_instruction_support(
@@ -343,10 +367,18 @@ def train() -> None:
         "num_val_samples": num_val,
         "num_parameters": sum(p.numel() for p in model.parameters()),
         "data_dirs": json.dumps([str(Path(d)) for d in args.data_dirs]),
+        "num_frames": dataset_num_frames,
     }
     best_val_acc = -1.0
     best_epoch = 0
     epoch_records: list[dict[str, Any]] = []
+    checkpoint_metadata: dict[str, Any] | None = None
+    if args.model_type == "vla":
+        checkpoint_metadata = {
+            "model_type": args.model_type,
+            "num_actions": dataset.num_actions,
+            "num_frames": dataset_num_frames,
+        }
 
     try:
         _log_mlflow_params(mlflow, params)
@@ -375,7 +407,7 @@ def train() -> None:
             if improved:
                 best_val_acc = val_acc
                 best_epoch = epoch
-                torch.save(model.state_dict(), best_model_path)
+                torch.save(_checkpoint_payload(model, checkpoint_metadata), best_model_path)
             epoch_records.append(
                 {
                     "epoch": epoch,
@@ -399,12 +431,13 @@ def train() -> None:
                 line += " | best=true"
             print(line)
 
-        torch.save(model.state_dict(), final_model_path)
+        torch.save(_checkpoint_payload(model, checkpoint_metadata), final_model_path)
 
         config = dict(params)
         config["data_dirs"] = [str(Path(d)) for d in args.data_dirs]
         config["class_weights"] = "inverse_frequency" if args.class_weights else "none"
         config["model_type"] = args.model_type
+        config["num_frames"] = dataset_num_frames
         train_log = {
             "config": config,
             "epochs": epoch_records,

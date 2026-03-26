@@ -9,7 +9,7 @@ dependencies = [
     "numpy>=1.24",
     "imageio[ffmpeg,pyav]>=2.31",
     "mlflow>=3.10.1",
-    "torchvision>=0.25.0",
+    "torchvision>=0.15",
     "transformers>=4.30",
 ]
 
@@ -21,6 +21,7 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 markers = [
     "integration: marks tests that require the Crafter environment",
     "slow: marks tests that take a long time to run (e.g. full training on real data)",
@@ -32,6 +33,18 @@ line-length = 100
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.uv]
+index-strategy = "unsafe-best-match"
+
+[[tool.uv.index]]
+name = "pytorch-cu118"
+url = "https://download.pytorch.org/whl/cu118"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu118" }]
+torchvision = [{ index = "pytorch-cu118" }]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/vla_agent"]

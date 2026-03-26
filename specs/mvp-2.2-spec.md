@@ -114,7 +114,7 @@ At least one task achieves a higher success rate than MVP-2.1 baselines (collect
 ## Artifact Pipeline
 
 ### Training
-command: C:/Users/alexe/AppData/Local/Programs/Python/Python311/python.exe scripts/train_imitation.py --model-type vla --data-dirs artifacts/trajectories/collect_wood artifacts/trajectories/place_table artifacts/trajectories/collect_stone --output-dir artifacts/models/mvp2.2 --experiment-name mvp2.2 --epochs 20 --batch-size 64 --lr 1e-3 --seed 42 --device cuda --no-mlflow --num-frames 4
+command: uv run python scripts/train_imitation.py --model-type vla --data-dirs artifacts/trajectories/collect_wood artifacts/trajectories/place_table artifacts/trajectories/collect_stone --output-dir artifacts/models/mvp2.2 --experiment-name mvp2.2 --epochs 20 --batch-size 64 --lr 1e-3 --seed 42 --device cuda --no-mlflow --num-frames 4
 required_files:
   - artifacts/models/mvp2.2/best_model.pt
   - artifacts/models/mvp2.2/train_log.json
@@ -126,7 +126,7 @@ metrics_checks:
     label: "AC-6: val_acc above 55%"
 
 ### Evaluation
-command: C:/Users/alexe/AppData/Local/Programs/Python/Python311/python.exe scripts/evaluate_policy.py --model artifacts/models/mvp2.2/best_model.pt --policy-type vla --num-episodes 50 --base-seed 1000 --output-dir artifacts/eval/mvp2.2 --device cuda --num-frames 4
+command: uv run python scripts/evaluate_policy.py --model artifacts/models/mvp2.2/best_model.pt --policy-type vla --num-episodes 50 --base-seed 1000 --output-dir artifacts/eval/mvp2.2 --device cuda --num-frames 4
 required_files:
   - artifacts/eval/mvp2.2/eval_results.json
 metrics_file: artifacts/eval/mvp2.2/eval_results.json

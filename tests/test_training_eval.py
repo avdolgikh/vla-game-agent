@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
 import shutil
+import sys
 import tempfile
 import uuid
 from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TRAIN_SCRIPT = REPO_ROOT / "scripts" / "train_imitation.py"
@@ -24,6 +27,20 @@ MVP1_BASELINE_SUCCESS_RATES = {
     "place_table": 0.84,
     "collect_stone": 0.10,
 }
+
+
+def _extract_num_frames_from_checkpoint(checkpoint: object) -> int | None:
+    if not isinstance(checkpoint, dict):
+        return None
+    candidate = checkpoint.get("num_frames")
+    if isinstance(candidate, int):
+        return candidate
+    for key in ("metadata", "config", "params", "args"):
+        nested = checkpoint.get(key)
+        result = _extract_num_frames_from_checkpoint(nested)
+        if result is not None:
+            return result
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -352,6 +369,100 @@ class TestTrainingEndToEnd:
         model = CrafterCNN(num_actions=8)
         state = torch.load(str(out_dir / "best_model.pt"), map_location="cpu")
         model.load_state_dict(state)
+
+    def test_training_records_num_frames_metadata(self, tmp_path):
+        """--num-frames propagates through config/logs and checkpoint metadata."""
+        data_dirs = [
+            _make_policy_dir(tmp_path / "data", "collect_wood", seed=0),
+            _make_policy_dir(tmp_path / "data", "place_table", seed=1),
+            _make_policy_dir(tmp_path / "data", "collect_stone", seed=2),
+        ]
+        out_dir = tmp_path / "vla_model_out"
+        result = _run_train(
+            data_dirs,
+            out_dir,
+            epochs=2,
+            extra_args=["--model-type", "vla", "--num-frames", "4", "--no-mlflow"],
+        )
+        assert result.returncode == 0, f"Training failed:\n{result.stderr}"
+
+        log = json.loads((out_dir / "train_log.json").read_text())
+        assert log["config"].get("num_frames") == 4
+
+        checkpoint = torch.load(str(out_dir / "best_model.pt"), map_location="cpu")
+        num_frames = _extract_num_frames_from_checkpoint(checkpoint)
+        assert num_frames == 4, (
+            "Checkpoint metadata must record --num-frames so evaluation can reuse it."
+        )
+
+
+class TestNumFramesPropagation:
+    """Unit tests for num_frames propagation through training."""
+
+    def test_training_passes_num_frames_to_dataset_and_model(self, tmp_path, monkeypatch):
+        from argparse import Namespace
+
+        from scripts import train_imitation as train_module
+
+        dataset_num_frames: list[int] = []
+        model_num_frames: list[int] = []
+
+        class DummyDataset:
+            def __init__(self, data_dirs, *, num_frames: int = 1):
+                dataset_num_frames.append(num_frames)
+                self.data_dirs = data_dirs
+                self.num_actions = NUM_ACTIONS
+
+            def unique_instructions(self) -> list[str]:
+                return []
+
+            def action_counts(self) -> np.ndarray:
+                return np.ones(NUM_ACTIONS, dtype=np.int32)
+
+        class DummyVLA(torch.nn.Module):
+            def __init__(self, num_actions: int, *, pretrained: bool = True, num_frames: int = 1):
+                super().__init__()
+                model_num_frames.append(num_frames)
+                self.num_actions = num_actions
+                self.action_head = torch.nn.Linear(1, 1)
+
+            def forward(self, image: torch.Tensor, text_embed: torch.Tensor) -> torch.Tensor:
+                batch = image.shape[0]
+                return torch.zeros(batch, self.num_actions, dtype=torch.float32)
+
+        def fake_parse_args() -> argparse.Namespace:
+            return Namespace(
+                data_dirs=[str(tmp_path / "data")],
+                output_dir=str(tmp_path / "model_out"),
+                epochs=1,
+                batch_size=2,
+                lr=1e-3,
+                val_fraction=0.0,
+                seed=42,
+                device="cpu",
+                experiment_name="num_frames_test",
+                model_type="vla",
+                class_weights=False,
+                no_mlflow=True,
+                num_frames=4,
+            )
+
+        def fake_make_dataloaders(dataset, val_fraction, seed, batch_size):
+            return (), (), 0, 0
+
+        monkeypatch.setattr(train_module, "TrajectoryDataset", DummyDataset)
+        monkeypatch.setattr(train_module, "CrafterVLA", DummyVLA)
+        monkeypatch.setattr(train_module, "parse_args", fake_parse_args)
+        monkeypatch.setattr(train_module, "_make_dataloaders", fake_make_dataloaders)
+        monkeypatch.setattr(train_module.torch, "save", lambda *args, **kwargs: None)
+
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+
+        train_module.train()
+
+        assert dataset_num_frames == [4]
+        assert model_num_frames == [4]
 
 
 # ---------------------------------------------------------------------------
@@ -700,7 +811,290 @@ class TestVLAEvaluationIntegration:
             assert "success_rate" in entry
             assert "successes" in entry
             assert isinstance(entry["episodes"], list)
-            assert entry["success_rate"] == pytest.approx(entry["successes"] / 2, abs=1e-6)
+        assert entry["success_rate"] == pytest.approx(entry["successes"] / 2, abs=1e-6)
+
+
+@pytest.mark.integration
+class TestVLAFrameBufferEvaluation:
+    """Verify evaluation reuses num_frames metadata and stacks frame buffers."""
+
+    def test_evaluation_uses_checkpoint_num_frames(self, tmp_path, monkeypatch):
+        import scripts.evaluate_policy as eval_module
+
+        num_frames = 4
+        model_path = tmp_path / "vla_checkpoint.pt"
+        model_path.write_bytes(b"")
+
+        original_torch_load = eval_module.torch.load
+
+        def fake_load(path, *args, **kwargs):
+            if Path(path).resolve() == model_path.resolve():
+                return {"state_dict": {}, "num_frames": num_frames}
+            return original_torch_load(path, *args, **kwargs)
+
+        monkeypatch.setattr(eval_module.torch, "load", fake_load)
+
+        class DummyEnv:
+            num_actions = 8
+
+            def __init__(self, seed: int):
+                self.seed = seed
+                self.step_count = 0
+
+            def reset(self):
+                self.step_count = 0
+                return np.zeros((64, 64, 3), dtype=np.uint8), {}
+
+            def step(self, action):
+                self.step_count += 1
+                obs = np.full((64, 64, 3), fill_value=self.step_count, dtype=np.uint8)
+                return obs, 0.0, True, False, {}
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(eval_module, "CrafterEnv", DummyEnv)
+
+        class DummyEncoder:
+            def __init__(self, device):
+                self.device = device
+                self.embed_dim = 384
+
+            def encode(self, instruction: str) -> torch.Tensor:
+                return torch.zeros(self.embed_dim, dtype=torch.float32)
+
+        monkeypatch.setattr(eval_module, "InstructionEncoder", DummyEncoder)
+
+        forward_shapes: list[tuple[int, int, int, int, int]] = []
+        constructed_num_frames: list[int] = []
+
+        class DummyVLA(torch.nn.Module):
+            def __init__(self, num_actions: int, *, pretrained: bool = True, num_frames: int = 1):
+                super().__init__()
+                self.num_actions = num_actions
+                self.num_frames = num_frames
+                constructed_num_frames.append(num_frames)
+
+            def load_state_dict(self, state):
+                pass
+
+            def forward(self, image: torch.Tensor, text_embed: torch.Tensor) -> torch.Tensor:
+                forward_shapes.append(tuple(image.shape))
+                batch = image.shape[0]
+                return torch.zeros(batch, self.num_actions, dtype=torch.float32)
+
+        monkeypatch.setattr(eval_module, "CrafterVLA", DummyVLA)
+
+        eval_out = tmp_path / "eval_out"
+        args = [
+            "evaluate_policy.py",
+            "--model",
+            str(model_path),
+            "--policy-type",
+            "vla",
+            "--num-episodes",
+            "1",
+            "--max-steps",
+            "1",
+            "--base-seed",
+            "0",
+            "--output-dir",
+            str(eval_out),
+            "--device",
+            "cpu",
+        ]
+        monkeypatch.setattr(sys, "argv", args)
+
+        eval_module.evaluate()
+
+        assert constructed_num_frames == [num_frames]
+        assert forward_shapes, "Expected at least one forward call for stacked frames."
+        for shape in forward_shapes:
+            assert shape == (1, num_frames, 3, 64, 64)
+
+    def test_evaluation_falls_back_to_cli_num_frames(self, tmp_path, monkeypatch):
+        import argparse
+        import scripts.evaluate_policy as eval_module
+
+        num_frames_cli = 3
+        model_path = tmp_path / "vla_checkpoint_cli.pt"
+        model_path.write_bytes(b"")
+
+        original_torch_load = eval_module.torch.load
+
+        def fake_load(path, *args, **kwargs):
+            if Path(path).resolve() == model_path.resolve():
+                return {"state_dict": {}}
+            return original_torch_load(path, *args, **kwargs)
+
+        monkeypatch.setattr(eval_module.torch, "load", fake_load)
+
+        class DummyEnv:
+            num_actions = 8
+
+            def __init__(self, seed: int):
+                self.seed = seed
+                self.step_count = 0
+
+            def reset(self):
+                self.step_count = 0
+                return np.zeros((64, 64, 3), dtype=np.uint8), {}
+
+            def step(self, action):
+                self.step_count += 1
+                obs = np.full((64, 64, 3), fill_value=self.step_count, dtype=np.uint8)
+                return obs, 0.0, True, False, {}
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(eval_module, "CrafterEnv", DummyEnv)
+
+        class DummyEncoder:
+            def __init__(self, device):
+                self.device = device
+                self.embed_dim = 384
+
+            def encode(self, instruction: str) -> torch.Tensor:
+                return torch.zeros(self.embed_dim, dtype=torch.float32)
+
+        monkeypatch.setattr(eval_module, "InstructionEncoder", DummyEncoder)
+
+        forward_shapes: list[tuple[int, int, int, int, int]] = []
+        constructed_cli_num_frames: list[int] = []
+
+        class DummyVLA(torch.nn.Module):
+            def __init__(self, num_actions: int, *, pretrained: bool = True, num_frames: int = 1):
+                super().__init__()
+                self.num_actions = num_actions
+                self.num_frames = num_frames
+                constructed_cli_num_frames.append(num_frames)
+
+            def load_state_dict(self, state):
+                pass
+
+            def forward(self, image: torch.Tensor, text_embed: torch.Tensor) -> torch.Tensor:
+                forward_shapes.append(tuple(image.shape))
+                batch = image.shape[0]
+                return torch.zeros(batch, self.num_actions, dtype=torch.float32)
+
+        monkeypatch.setattr(eval_module, "CrafterVLA", DummyVLA)
+
+        def fake_parse_args() -> argparse.Namespace:
+            return argparse.Namespace(
+                model=str(model_path),
+                policy_type="vla",
+                num_episodes=1,
+                max_steps=1,
+                base_seed=0,
+                output_dir=str(tmp_path / "eval_cli_out"),
+                device="cpu",
+                num_frames=num_frames_cli,
+            )
+
+        monkeypatch.setattr(eval_module, "parse_args", fake_parse_args)
+
+        eval_module.evaluate()
+
+        assert constructed_cli_num_frames == [num_frames_cli]
+        for shape in forward_shapes:
+            assert shape == (1, num_frames_cli, 3, 64, 64)
+
+    def test_evaluation_zeroes_frame_buffer_on_reset(self, tmp_path, monkeypatch):
+        import scripts.evaluate_policy as eval_module
+
+        num_frames = 4
+        model_path = tmp_path / "vla_checkpoint_zero.pt"
+        model_path.write_bytes(b"")
+
+        original_torch_load = eval_module.torch.load
+
+        def fake_load(path, *args, **kwargs):
+            if Path(path).resolve() == model_path.resolve():
+                return {"state_dict": {}, "num_frames": num_frames}
+            return original_torch_load(path, *args, **kwargs)
+
+        monkeypatch.setattr(eval_module.torch, "load", fake_load)
+
+        recorded_stacks: list[torch.Tensor] = []
+        initial_observations: list[np.ndarray] = []
+
+        class DummyEnv:
+            num_actions = 8
+
+            def __init__(self, seed: int):
+                self.seed = seed
+
+            def reset(self):
+                obs = np.full((64, 64, 3), fill_value=self.seed, dtype=np.uint8)
+                initial_observations.append(obs.copy())
+                return obs, {}
+
+            def step(self, action):
+                obs = np.zeros((64, 64, 3), dtype=np.uint8)
+                return obs, 0.0, True, False, {}
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(eval_module, "CrafterEnv", DummyEnv)
+
+        class DummyEncoder:
+            def __init__(self, device):
+                self.device = device
+                self.embed_dim = 384
+
+            def encode(self, instruction: str) -> torch.Tensor:
+                return torch.zeros(self.embed_dim, dtype=torch.float32)
+
+        monkeypatch.setattr(eval_module, "InstructionEncoder", DummyEncoder)
+
+        class DummyVLA(torch.nn.Module):
+            def __init__(self, num_actions: int, *, pretrained: bool = True, num_frames: int = 1):
+                super().__init__()
+                self.num_actions = num_actions
+                self.num_frames = num_frames
+
+            def load_state_dict(self, state):
+                pass
+
+            def forward(self, image: torch.Tensor, text_embed: torch.Tensor) -> torch.Tensor:
+                recorded_stacks.append(image.clone())
+                batch = image.shape[0]
+                return torch.zeros(batch, self.num_actions, dtype=torch.float32)
+
+        monkeypatch.setattr(eval_module, "CrafterVLA", DummyVLA)
+
+        eval_out = tmp_path / "eval_zero"
+        args = [
+            "evaluate_policy.py",
+            "--model",
+            str(model_path),
+            "--policy-type",
+            "vla",
+            "--num-episodes",
+            "1",
+            "--max-steps",
+            "1",
+            "--base-seed",
+            "0",
+            "--output-dir",
+            str(eval_out),
+            "--device",
+            "cpu",
+        ]
+        monkeypatch.setattr(sys, "argv", args)
+
+        eval_module.evaluate()
+
+        assert len(recorded_stacks) == len(initial_observations)
+        for stack, obs in zip(recorded_stacks, initial_observations):
+            assert stack.shape == (1, num_frames, 3, 64, 64)
+            assert torch.allclose(
+                stack[:, : num_frames - 1], torch.zeros_like(stack[:, : num_frames - 1])
+            )
+            expected_last = torch.from_numpy(obs).permute(2, 0, 1).to(torch.float32) / 255.0
+            assert torch.allclose(stack[0, -1], expected_last)
 
 
 # ---------------------------------------------------------------------------

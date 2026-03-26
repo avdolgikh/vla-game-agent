@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from bisect import bisect_right
 import json
 from pathlib import Path
 from typing import Callable, Sequence
@@ -14,16 +15,27 @@ from torch.utils.data import Dataset, Subset
 class TrajectoryDataset(Dataset):
     """In-memory dataset of (observation, action) pairs loaded from Crafter trajectories."""
 
-    def __init__(self, data_dirs: Sequence[str | Path], transform: Callable | None = None) -> None:
+    def __init__(
+        self,
+        data_dirs: Sequence[str | Path],
+        transform: Callable | None = None,
+        *,
+        num_frames: int = 1,
+    ) -> None:
         if not data_dirs:
             raise ValueError("TrajectoryDataset requires at least one data directory.")
+        if num_frames < 1:
+            raise ValueError("num_frames must be >= 1.")
         self._transform = transform
+        self._num_frames = int(num_frames)
         self._episode_slices: list[tuple[int, int]] = []
+        self._episode_boundaries: list[int] = []
         self._num_actions: int | None = None
         self._observations: np.ndarray
         self._actions: np.ndarray
         self._instructions: list[str]
         self._action_counts: np.ndarray | None = None
+        self._frame_shape: tuple[int, int, int] | None = None
         self._load_directories(data_dirs)
 
     # ------------------------------------------------------------------
@@ -34,11 +46,22 @@ class TrajectoryDataset(Dataset):
         return int(self._actions.shape[0])
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor | str]:
-        obs = self._observations[index]
-        action = int(self._actions[index])
-        obs_tensor = torch.from_numpy(obs).permute(2, 0, 1).to(torch.float32) / 255.0
+        obs_tensor: torch.Tensor
+        if self._num_frames == 1:
+            obs = self._observations[index]
+            obs_tensor = torch.from_numpy(obs).permute(2, 0, 1).to(torch.float32) / 255.0
+        else:
+            stack = self._build_frame_stack(index)
+            obs_tensor = torch.from_numpy(stack).permute(0, 3, 1, 2).to(torch.float32) / 255.0
+
         if self._transform is not None:
-            obs_tensor = self._transform(obs_tensor)
+            if obs_tensor.dim() == 3:
+                obs_tensor = self._transform(obs_tensor)
+            else:
+                frames = [self._transform(frame) for frame in obs_tensor]
+                obs_tensor = torch.stack(frames, dim=0)
+
+        action = int(self._actions[index])
         action_tensor = torch.tensor(action, dtype=torch.long)
         instruction = self._instructions[index] if self._instructions else ""
         return {"observation": obs_tensor, "action": action_tensor, "instruction": instruction}
@@ -88,6 +111,8 @@ class TrajectoryDataset(Dataset):
     # ------------------------------------------------------------------
 
     def _load_directories(self, data_dirs: Sequence[str | Path]) -> None:
+        self._episode_slices.clear()
+        self._episode_boundaries = []
         obs_chunks: list[np.ndarray] = []
         action_chunks: list[np.ndarray] = []
         instruction_chunks: list[list[str]] = []
@@ -136,6 +161,7 @@ class TrajectoryDataset(Dataset):
                 start = total_samples
                 total_samples += actions.shape[0]
                 self._episode_slices.append((start, total_samples))
+                self._episode_boundaries.append(total_samples)
 
         if not obs_chunks:
             self._observations = np.empty((0, 64, 64, 3), dtype=np.uint8)
@@ -143,6 +169,7 @@ class TrajectoryDataset(Dataset):
             self._instructions = []
             if self._num_actions is None:
                 self._num_actions = 0
+            self._frame_shape = (64, 64, 3)
         else:
             self._observations = np.concatenate(obs_chunks, axis=0)
             self._actions = np.concatenate(action_chunks, axis=0)
@@ -150,6 +177,26 @@ class TrajectoryDataset(Dataset):
             for chunk in instruction_chunks:
                 flat_instructions.extend(chunk)
             self._instructions = flat_instructions
+            self._frame_shape = tuple(self._observations.shape[1:])
+
+    def _build_frame_stack(self, index: int) -> np.ndarray:
+        if not self._episode_slices:
+            raise RuntimeError("No episodes loaded for frame stacking.")
+        if self._frame_shape is None:
+            raise RuntimeError("Frame shape unavailable for stacking.")
+
+        episode_idx = bisect_right(self._episode_boundaries, index)
+        if episode_idx >= len(self._episode_slices):
+            raise IndexError(f"Sample index {index} is out of range for frame stacking.")
+        episode_start, _ = self._episode_slices[episode_idx]
+
+        stack = np.zeros((self._num_frames, *self._frame_shape), dtype=np.uint8)
+        for frame_offset in range(self._num_frames):
+            src_index = index - (self._num_frames - 1 - frame_offset)
+            if src_index < episode_start or src_index < 0:
+                continue
+            stack[frame_offset] = self._observations[src_index]
+        return stack
 
 
 def train_val_split(

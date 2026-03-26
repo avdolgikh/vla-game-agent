@@ -198,7 +198,7 @@ class PromptBuilder:
             f"- Spec path: {spec_path.as_posix()}",
             "- Repo rules path: AGENTS.md",
             "- This pipeline is non-interactive. Do not ask the human for more input; use the embedded spec/context and inspect the repository directly.",
-            "- Tests must be run with `uv run pytest` or `uv run python -m pytest`.",
+            "- Tests must be run with `uv run python -m pytest`.",
         ]
         if feedback:
             sections.extend(["- Reviewer blocking feedback to address:"])
@@ -859,18 +859,6 @@ class PipelineRunner:
         """Run an artifact stage: execute command, verify files, check metrics."""
         self._log_stage_header(stage_label)
         self.logger.log(f"[artifact] Running: {config.command}")
-        env = os.environ.copy()
-        src_dir = str(self.repo_root / "src")
-        env["PYTHONPATH"] = src_dir + os.pathsep + env.get("PYTHONPATH", "")
-        # Strip virtualenv so the spec command's Python uses its own packages,
-        # not the pipeline orchestrator's venv (which may lack CUDA, etc.).
-        env.pop("VIRTUAL_ENV", None)
-        env.pop("PYTHONHOME", None)
-        venv_prefix = os.path.normcase(str((self.repo_root / ".venv").resolve()))
-        path_parts = env.get("PATH", "").split(os.pathsep)
-        env["PATH"] = os.pathsep.join(
-            p for p in path_parts if not os.path.normcase(p).startswith(venv_prefix)
-        )
         result = subprocess.run(
             config.command,
             cwd=self.repo_root,
@@ -878,7 +866,6 @@ class PipelineRunner:
             text=True,
             check=False,
             shell=True,
-            env=env,
         )
         if result.stdout:
             for line in result.stdout.rstrip().splitlines():
@@ -1055,10 +1042,10 @@ class PipelineRunner:
                 spec_path=self.spec_path,
                 stage_name="Stage 4: Validation",
                 stage_instruction=(
-                    "Validate the implementation end-to-end. If the spec defines runnable scripts or "
-                    "CLI commands, run them with minimal arguments. If it does not, exercise the main "
-                    "code via `uv run python -c ...`. Fix issues you find. Do not modify frozen tests. "
-                    "Run `uv run python -m pytest` at the end."
+                    "Validate the implementation by running `uv run python -m pytest`. Fix any test failures. "
+                    "Do not modify frozen tests. Do NOT run training scripts — training is handled "
+                    "by a later pipeline stage. If you need to verify a script's CLI args parse "
+                    "correctly, use `--help` only. Always use `--device cuda` when device is relevant."
                 ),
             )
             self._run_role(

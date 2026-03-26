@@ -25,6 +25,13 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _load_state_dict(path: Path, device: torch.device) -> dict:
+    checkpoint = torch.load(path, map_location=device)
+    if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+        return checkpoint["state_dict"]
+    return checkpoint
+
+
 def main() -> None:
     args = parse_args()
     device = torch.device(
@@ -36,7 +43,7 @@ def main() -> None:
     )
 
     model = CrafterCNN(num_actions=CrafterEnv.num_actions)
-    model.load_state_dict(torch.load(Path(args.model), map_location=device))
+    model.load_state_dict(_load_state_dict(Path(args.model), device))
     model.to(device)
     model.eval()
 

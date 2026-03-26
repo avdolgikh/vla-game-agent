@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import torch
+from torch import nn
 import torch.nn.functional as F
 import pytest
 
@@ -134,6 +135,109 @@ def test_crafter_vla_forward_and_shapes() -> None:
     assert actions.min() >= 0 and actions.max() < model.num_actions
 
 
+def test_crafter_vla_accepts_frame_stacks() -> None:
+    """CrafterVLA must consume (B, N, 3, H, W) inputs when num_frames > 1."""
+    from vla_agent.models import CrafterVLA
+
+    torch.manual_seed(0)
+    model = CrafterVLA(pretrained=False, num_frames=4)
+    model.eval()
+
+    batch = 2
+    stacked_frames = torch.rand(batch, 4, 3, 64, 64)
+    text_embedding = torch.rand(batch, model.text_embed_dim)
+    with torch.no_grad():
+        logits = model(stacked_frames, text_embedding)
+
+    assert logits.shape == (batch, model.num_actions)
+    assert model.num_frames == 4
+
+
+def test_crafter_vla_single_frame_backward_compatibility() -> None:
+    """CrafterVLA(num_frames=1) must still accept (B, 3, H, W) inputs."""
+    from vla_agent.models import CrafterVLA
+
+    torch.manual_seed(1)
+    model = CrafterVLA(pretrained=False, num_frames=1)
+    model.eval()
+
+    single_frame = torch.rand(1, 3, 64, 64)
+    text_embedding = torch.rand(1, model.text_embed_dim)
+    with torch.no_grad():
+        logits = model(single_frame, text_embedding)
+
+    assert logits.shape == (1, model.num_actions)
+    assert model.num_frames == 1
+
+
+def test_crafter_vla_mean_pools_frame_features() -> None:
+    """CrafterVLA must average per-frame embeddings before concatenating text."""
+    from vla_agent.models import CrafterVLA
+
+    torch.manual_seed(0)
+    model = CrafterVLA(pretrained=False, num_frames=4)
+    model.eval()
+    # Neutralize normalization so constant-valued frames stay predictable.
+    model.image_mean.zero_()
+    model.image_std.fill_(1.0)
+
+    class _DummyBackbone(nn.Module):
+        def forward(self, image: torch.Tensor) -> torch.Tensor:
+            return image.mean(dim=(1, 2, 3), keepdim=True)
+
+    model.vision_backbone = _DummyBackbone()
+    model.vision_avgpool = nn.Identity()
+    model.vision_norm = nn.Identity()
+    # The dummy backbone returns a single-channel feature, so align vision_dim accordingly.
+    model.vision_dim = 1
+
+    recorded_vision: list[torch.Tensor] = []
+
+    class _RecordingActionHead(nn.Module):
+        def forward(self, fused: torch.Tensor) -> torch.Tensor:
+            recorded_vision.append(fused[:, : model.vision_dim])
+            batch_size = fused.shape[0]
+            return torch.zeros(batch_size, model.num_actions, dtype=torch.float32)
+
+    model.action_head = _RecordingActionHead()
+
+    batch = 1
+    frame_values = torch.tensor([1.0, 4.0, 7.0, 10.0], dtype=torch.float32)
+    frames = torch.zeros(batch, 4, 3, 64, 64, dtype=torch.float32)
+    for idx, value in enumerate(frame_values):
+        frames[:, idx].fill_(value)
+
+    text_embedding = torch.zeros(batch, model.text_embed_dim, dtype=torch.float32)
+
+    with torch.no_grad():
+        _ = model(frames, text_embedding)
+
+    assert recorded_vision, "Action head must be called at least once"
+    vision_features = recorded_vision[0]
+    expected_mean = frame_values.mean()
+    assert vision_features.shape == (batch, 1)
+    assert torch.allclose(vision_features, expected_mean)
+    assert not torch.allclose(
+        vision_features, torch.full_like(vision_features, frame_values[-1])
+    ), "Features must not drop history and fallback to the last frame"
+
+
+def test_crafter_vla_action_head_wider_layers() -> None:
+    """The action head should implement 1152→512→256→8 linear layers."""
+    from vla_agent.models import CrafterVLA
+
+    model = CrafterVLA(pretrained=False, num_frames=4)
+    linear_layers = [layer for layer in model.action_head if isinstance(layer, torch.nn.Linear)]
+
+    assert len(linear_layers) == 3
+    assert linear_layers[0].in_features == model.vision_dim + model.text_embed_dim
+    assert linear_layers[0].out_features == 512
+    assert linear_layers[1].in_features == 512
+    assert linear_layers[1].out_features == 256
+    assert linear_layers[2].in_features == 256
+    assert linear_layers[2].out_features == model.num_actions
+
+
 def test_crafter_vla_resizes_inputs_before_backbone(monkeypatch: pytest.MonkeyPatch) -> None:
     """The forward pass must upscale 64x64 frames to 224x224 before the vision kernel."""
     from torchvision.transforms import functional as TF
@@ -196,8 +300,11 @@ def test_action_head_is_only_trainable_module() -> None:
 
     trainable = [p for p in model.parameters() if p.requires_grad]
     trainable_param_count = sum(p.numel() for p in trainable)
-    assert trainable_param_count < 500_000
-    assert trainable_param_count > 0
+    action_head_trainable = sum(p.numel() for p in model.action_head.parameters())
+    assert trainable_param_count == action_head_trainable
+    assert trainable_param_count == 723_720, (
+        "Wider action head should contribute ~724K trainable params"
+    )
 
     for p in model.parameters():
         if id(p) in action_head_ids:

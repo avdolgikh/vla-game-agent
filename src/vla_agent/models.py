@@ -117,10 +117,14 @@ class CrafterVLA(nn.Module):
         text_embed_dim: int = 384,
         num_actions: int = 8,
         pretrained: bool = True,
+        num_frames: int = 1,
     ) -> None:
         super().__init__()
+        if num_frames < 1:
+            raise ValueError("num_frames must be >= 1.")
         self.text_embed_dim = text_embed_dim
         self.num_actions = num_actions
+        self.num_frames = int(num_frames)
         weights = ConvNeXt_Tiny_Weights.IMAGENET1K_V1 if pretrained else None
         backbone = convnext_tiny(weights=weights)
         self.vision_backbone = backbone.features
@@ -130,7 +134,9 @@ class CrafterVLA(nn.Module):
         self._freeze_module(self.vision_backbone)
         self._freeze_module(self.vision_norm)
         self.action_head = nn.Sequential(
-            nn.Linear(self.vision_dim + text_embed_dim, 256),
+            nn.Linear(self.vision_dim + text_embed_dim, 512),
+            nn.ReLU(),
+            nn.Linear(512, 256),
             nn.ReLU(),
             nn.Linear(256, num_actions),
         )
@@ -159,8 +165,8 @@ class CrafterVLA(nn.Module):
         return self
 
     def forward(self, image: torch.Tensor, text_embed: torch.Tensor) -> torch.Tensor:
-        if image.dim() != 4:
-            raise ValueError("image tensor must be 4D (B, C, H, W)")
+        if image.dim() not in (4, 5):
+            raise ValueError("image tensor must be 4D or 5D")
         if text_embed.dim() != 2:
             raise ValueError("text_embed tensor must be 2D (B, D)")
         if text_embed.shape[1] != self.text_embed_dim:
@@ -168,6 +174,22 @@ class CrafterVLA(nn.Module):
                 f"text_embed dimension mismatch: expected {self.text_embed_dim}, "
                 f"got {text_embed.shape[1]}"
             )
+
+        stacked_input = image.dim() == 5
+        if stacked_input:
+            batch_size, frame_count, channels, height, width = image.shape
+            if frame_count != self.num_frames:
+                raise ValueError(
+                    f"Expected {self.num_frames} frames, got {frame_count} in stacked input."
+                )
+            image = image.reshape(batch_size * frame_count, channels, height, width)
+        else:
+            if self.num_frames != 1:
+                raise ValueError(
+                    "CrafterVLA configured for stacked frames requires 5D input tensors."
+                )
+            batch_size = image.shape[0]
+            frame_count = 1
 
         image = image.to(self.image_mean.dtype)
         image = TF.resize(image, [224, 224], antialias=True)
@@ -179,10 +201,15 @@ class CrafterVLA(nn.Module):
             vision = self.vision_avgpool(vision)
             vision = self.vision_norm(vision)
         vision = torch.flatten(vision, 1)
+        if stacked_input:
+            vision = vision.view(batch_size, frame_count, self.vision_dim)
+            vision = vision.mean(dim=1)
         if vision.shape[1] != self.vision_dim:
             raise RuntimeError(
                 f"Unexpected vision feature dimension {vision.shape[1]}, expected {self.vision_dim}."
             )
+        if not stacked_input:
+            vision = vision.view(batch_size, self.vision_dim)
         fused = torch.cat([vision, text_embed], dim=1)
         logits = self.action_head(fused)
         return logits

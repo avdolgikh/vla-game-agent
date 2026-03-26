@@ -338,6 +338,48 @@ class TestTrajectoryDatasetLoading:
             )
 
 
+class TestTrajectoryDatasetFrameStacks:
+    """AC-1/AC-2: multi-frame history returns and padding at episode starts."""
+
+    def test_returns_frame_stack_with_requested_history(self, tmp_path):
+        """The dataset must expose N frames per sample when requested."""
+        from vla_agent.data import TrajectoryDataset
+
+        policy_dir = _make_policy_dir(
+            tmp_path, "collect_wood", num_episodes=1, steps_per_episode=[10]
+        )
+        ds = TrajectoryDataset(data_dirs=[str(policy_dir)], num_frames=4)
+        sample = ds[3]
+        observation = sample["observation"]
+
+        assert observation.shape == (4, 3, 64, 64)
+        assert observation.dtype == torch.float32
+
+    def test_frame_stack_zero_pads_at_episode_start(self, tmp_path):
+        """Episode beginnings must zero-pad missing history frames."""
+        from vla_agent.data import TrajectoryDataset
+
+        steps = [5, 6]
+        policy_dir = _make_policy_dir(
+            tmp_path, "place_table", num_episodes=2, steps_per_episode=steps
+        )
+        ds = TrajectoryDataset(data_dirs=[str(policy_dir)], num_frames=4)
+        episode_starts = [start for start, _ in ds.episode_slices]
+        assert len(episode_starts) >= 2
+
+        num_frames = 4
+        for start_idx in episode_starts[:2]:
+            for offset in range(3):
+                sample_idx = start_idx + offset
+                observation = ds[sample_idx]["observation"]
+                pad_len = max(0, num_frames - (offset + 1))
+                if pad_len:
+                    assert torch.all(observation[:pad_len] == 0).item()
+                assert float(observation.sum()) > 0.0
+                if pad_len < num_frames:
+                    assert float(observation[pad_len:].sum()) > 0.0
+
+
 class TestTrajectoryDatasetInstructions:
     """AC-1 extension: TrajectoryDataset exposes per-sample instructions."""
 

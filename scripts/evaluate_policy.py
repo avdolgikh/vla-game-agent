@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections import deque
 from pathlib import Path
 
 import torch
@@ -28,6 +29,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-seed", type=int, default=1000)
     parser.add_argument("--output-dir", type=str, default="artifacts/eval/mvp1")
     parser.add_argument("--device", choices=["cpu", "cuda", "auto"], default="auto")
+    parser.add_argument(
+        "--num-frames",
+        type=int,
+        default=1,
+        help="Number of stacked frames per observation (VLA only)",
+    )
     return parser.parse_args()
 
 
@@ -43,23 +50,54 @@ def _resolve_device(arg: str) -> torch.device:
     raise ValueError(f"Unknown device option: {arg}")
 
 
-def _load_policy(policy_type: str, model_path: Path, device: torch.device) -> torch.nn.Module:
+def _load_checkpoint(model_path: Path, device: torch.device) -> tuple[dict, dict]:
+    checkpoint = torch.load(model_path, map_location=device)
+    if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+        state_dict = checkpoint["state_dict"]
+        metadata = dict(checkpoint.get("metadata") or {})
+    else:
+        state_dict = checkpoint
+        metadata = {}
+    return state_dict, metadata
+
+
+def _load_policy(
+    policy_type: str,
+    model_path: Path,
+    device: torch.device,
+    requested_num_frames: int,
+) -> tuple[torch.nn.Module, dict, int]:
+    state_dict, metadata = _load_checkpoint(model_path, device)
     if policy_type == "cnn":
+        num_frames = 1
         model = CrafterCNN(num_actions=CrafterEnv.num_actions)
     elif policy_type == "vla":
-        model = CrafterVLA(num_actions=CrafterEnv.num_actions, pretrained=False)
+        metadata_frames = metadata.get("num_frames")
+        if metadata_frames is not None:
+            num_frames = int(metadata_frames)
+        else:
+            num_frames = requested_num_frames
+        model = CrafterVLA(
+            num_actions=CrafterEnv.num_actions,
+            pretrained=False,
+            num_frames=num_frames,
+        )
     else:
         raise ValueError(f"Unsupported policy type: {policy_type}")
-    state = torch.load(model_path, map_location=device)
-    model.load_state_dict(state)
+    model.load_state_dict(state_dict)
     model.to(device)
     model.eval()
-    return model
+    return model, metadata, num_frames
 
 
 def _obs_to_tensor(obs, device: torch.device) -> torch.Tensor:
     tensor = torch.from_numpy(obs).permute(2, 0, 1).to(torch.float32) / 255.0
     return tensor.unsqueeze(0).to(device)
+
+
+def _init_frame_buffer(num_frames: int, device: torch.device) -> deque[torch.Tensor]:
+    frame = torch.zeros(3, 64, 64, dtype=torch.float32, device=device)
+    return deque([frame.clone() for _ in range(num_frames)], maxlen=num_frames)
 
 
 def _success_flags(info: dict) -> dict[str, bool]:
@@ -78,6 +116,8 @@ def _run_episode(
     max_steps: int,
     device: torch.device,
     policy_type: str,
+    *,
+    num_frames: int = 1,
     text_embed: torch.Tensor | None = None,
 ) -> tuple[int, float, dict[str, bool]]:
     env = CrafterEnv(seed=seed)
@@ -85,15 +125,25 @@ def _run_episode(
         obs, info = env.reset()
         total_reward = 0.0
         num_steps = 0
+        frame_buffer: deque[torch.Tensor] | None = None
+        if policy_type == "vla" and num_frames > 1:
+            frame_buffer = _init_frame_buffer(num_frames, device)
+
         for _ in range(max_steps):
             obs_tensor = _obs_to_tensor(obs, device)
+            model_obs = obs_tensor
+            if frame_buffer is not None:
+                frame_buffer.append(obs_tensor.squeeze(0))
+                stacked = torch.stack(list(frame_buffer), dim=0).unsqueeze(0)
+                model_obs = stacked
+
             with torch.no_grad():
                 if policy_type == "cnn":
-                    logits = model(obs_tensor)
+                    logits = model(model_obs)
                 else:
                     if text_embed is None:
                         raise RuntimeError("VLA policies require a text embedding.")
-                    logits = model(obs_tensor, text_embed)
+                    logits = model(model_obs, text_embed)
             action = int(logits.argmax(dim=1).item())
             obs, reward, terminated, truncated, info = env.step(action)
             total_reward += float(reward)
@@ -108,11 +158,18 @@ def _run_episode(
 
 def evaluate() -> None:
     args = parse_args()
+    if args.num_frames < 1:
+        raise ValueError("--num-frames must be >= 1.")
     device = _resolve_device(args.device)
     model_path = Path(args.model)
     if not model_path.exists():
         raise FileNotFoundError(f"Model file '{model_path}' not found.")
-    model = _load_policy(args.policy_type, model_path, device)
+    model, metadata, effective_num_frames = _load_policy(
+        args.policy_type,
+        model_path,
+        device,
+        args.num_frames,
+    )
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -124,7 +181,12 @@ def evaluate() -> None:
         for idx in range(args.num_episodes):
             seed = args.base_seed + idx
             num_steps, total_reward, success = _run_episode(
-                model, seed, args.max_steps, device, "cnn"
+                model,
+                seed,
+                args.max_steps,
+                device,
+                "cnn",
+                num_frames=1,
             )
             episodes.append(
                 {
@@ -159,6 +221,7 @@ def evaluate() -> None:
             "model": str(model_path),
             "model_type": "cnn",
             "policy_type": "cnn",
+            "num_frames": 1,
             "num_episodes": args.num_episodes,
             "base_seed": args.base_seed,
             "max_steps": args.max_steps,
@@ -191,6 +254,7 @@ def evaluate() -> None:
                     args.max_steps,
                     device,
                     "vla",
+                    num_frames=effective_num_frames,
                     text_embed=text_embed,
                 )
                 task_success = bool(success.get(task, False))
@@ -231,6 +295,7 @@ def evaluate() -> None:
             "model": str(model_path),
             "model_type": "vla",
             "policy_type": "vla",
+            "num_frames": effective_num_frames,
             "num_episodes": total_episodes,
             "num_episodes_per_instruction": args.num_episodes,
             "base_seed": args.base_seed,
@@ -238,6 +303,7 @@ def evaluate() -> None:
             "success_rates": success_rates,
             "instructions": instruction_results,
             "episodes": episodes,
+            "checkpoint_metadata": metadata,
         }
         print(f"Done. {total_episodes} episodes evaluated ({args.num_episodes} per instruction).")
         for instruction, entry in instruction_results.items():
