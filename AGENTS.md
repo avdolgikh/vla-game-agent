@@ -95,8 +95,8 @@ Document every significant decision here as it happens.
 | MVP-1 | Vision-only imitation baseline ("V" only — no text) | **Done** — val_acc=71.6%, asymmetric success (8%/84%/10%) |
 | MVP-2 | Instruction-conditioned VLA policy ("V+L→A") | **Done** — val_acc=51.6%, collect_wood 72%/place_table 22%/collect_stone 0% |
 | MVP-2.1 | 224×224 resize (proven quick win) | **Done** — val_acc=60.9%, collect_wood 48%/place_table 12%/collect_stone 0% |
-| MVP-2.2 | Frame stacking + wider head (temporal context) | Planned — spec ready |
-| MVP-2.3 | Domain adaptation (trainable CNN or unfrozen ConvNeXt) | Planned — spec ready |
+| MVP-2.2 | Frame stacking + wider head (temporal context) | **Done** — val_acc=55.0%, collect_wood 58%/place_table 22%/collect_stone 0% |
+| MVP-2.3 | Domain adaptation (trainable CNN replacing frozen ConvNeXt) | Planned — spec ready |
 | Pipeline-ext | Artifact produce/validate/accept pipeline stages | **Done** — stages 6-8 with implementer retry loop, 34 tests passing |
 | MVP-3 | Portfolio polish | Planned |
 
@@ -259,6 +259,27 @@ At 64×64 input, the final feature map is **2×2 = 4 spatial positions** — alm
 
 This is **spatial scale alignment, not model capacity** — same parameters, same architecture. The frozen filters produce more meaningful activations when features appear at the scale they were trained to detect. Implication: **any frozen pretrained encoder must be fed at its training resolution.** If using a trainable CNN, 64×64 is fine because the CNN learns the right scale from scratch.
 
+### MVP-2.2 Results (Frame Stacking)
+
+- **Training:** 20 epochs, best val_acc=55.0% at epoch 17. AC-6 (>55%) narrowly missed (0.5496 vs 0.55).
+- **Evaluation (50 episodes per instruction):**
+  - `collect wood` → `collect_wood`: 29/50 (**58.0%**) — MVP-2.1 baseline: 48% — **+10%**
+  - `place table` → `place_table`: 11/50 (**22.0%**) — MVP-2.1 baseline: 12% — **+10%**
+  - `collect stone` → `collect_stone`: 0/50 (0.0%) — no change
+- **Key finding:** Frame stacking improved both task success rates (+10% each) despite lower val_acc (55% vs 60.9%). Temporal context helps the agent execute multi-step behaviors. val_acc is a poor proxy for task performance — the model makes better action sequences even if individual frame predictions are less accurate.
+- **Architecture:** 4-frame stacking with per-frame ConvNeXt encoding + mean pooling, wider action head (1152→512→256→8), ~723K trainable params.
+
+### MVP-2.3 Decision: Option A (Trainable CNN)
+
+MVP-2.2 results (val_acc=55%, place_table=22%) fall below the Option B threshold (>70% val_acc, >40% place_table). The decision criteria from the plan clearly points to Option A. Additional reasoning:
+- MVP-1's trainable CNN achieved 71.6% val_acc — 11+ points above any frozen ConvNeXt config. The domain gap (ImageNet photos vs Crafter pixel art) is the primary bottleneck.
+- A trainable CNN learns Crafter-specific features, operates at native 64×64 (no resize), and trains faster.
+- Combined with text conditioning (MVP-2) and frame stacking (MVP-2.2), this should be the strongest configuration.
+
+### CUDA in Venv
+
+The `.venv` now has CUDA torch (`torch==2.7.1+cu118`) configured via `[[tool.uv.index]]` in `pyproject.toml`. This eliminates the need for any global-vs-local env switching. All commands use `uv run python` uniformly.
+
 ---
 
 ## Next Steps Plan (for Future Sessions)
@@ -301,21 +322,22 @@ Completed 2026-03-25. Stages 6-8 implemented in `core.py`, 29 tests in `test_pip
 
 **Expected:** val_acc ~68-72%, place_table > 40%, collect_stone > 10%.
 
-### Step 4: Domain Adaptation (MVP-2.3)
+### Step 4: Domain Adaptation (MVP-2.3) — DECIDED: Option A
 
-**Two competing approaches — pick one based on Steps 2-3 results:**
+**Decision:** Option A (trainable lightweight CNN). MVP-2.2 results (val_acc=55%, place_table=22%) fall well below the Option B thresholds (>70% val_acc, >40% place_table).
 
-**Option A: Replace ConvNeXt with trainable lightweight CNN**
-- MVP-1's CrafterCNN (350K params) got 71.6% val_acc on 64×64 — better than frozen ConvNeXt. A trainable CNN that learns Crafter-specific features, combined with frame stacking, could be the sweet spot.
-- Drops the 224×224 resize requirement (CNN learns at native 64×64).
-- Faster training on CPU.
+**What to do:**
+1. Spec ready: `specs/mvp-2.3-spec.md`
+2. Add `vision_type` param to `CrafterVLA`: `"convnext"` (default) or `"cnn"` (trainable)
+3. CNN backbone: same 3-conv architecture as `CrafterCNN` + Linear(1024,256) → 256-d vision features
+4. No 224×224 resize, no ImageNet normalization (CNN learns at native 64×64)
+5. Action head: 640→256→8 (smaller fusion dim = simpler head)
+6. New `--model-type vla-cnn` in training/evaluation scripts
+7. Optimizer trains all `requires_grad=True` params (CNN + action head), text encoder stays frozen
+8. Keep frame stacking (num_frames=4) from MVP-2.2
 
-**Option B: Unfreeze last ConvNeXt stage**
-- Keep 224×224, unfreeze last 1-2 ConvNeXt stages with differential LR (10× lower).
-- Progressive schedule: epochs 1-5 head only, 5-10 unfreeze last stage.
-- Risk: overfitting with 33K samples.
-
-**Decision criteria:** If 224×224 resize + frame stacking achieves >70% val_acc and >40% place_table, Option B (incremental unfreezing) is lower risk. If still <65%, Option A (trainable CNN from scratch) is worth the bigger change.
+**Expected:** val_acc > 65%, task success rates improve over MVP-2.2 baselines.
+**Run:** `uv run python scripts/run_pipeline.py mvp-2.3 --provider codex`
 
 ### Step 5: Portfolio Polish (MVP-3)
 
