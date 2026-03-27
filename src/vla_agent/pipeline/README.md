@@ -12,8 +12,8 @@ You write a spec. Three AI agents do the rest:
 2. **Reviewer** checks the tests against the spec (up to 4 revision rounds)
 3. **Implementer** writes code to make the frozen tests pass
 4. **Reviewer** checks the code (up to 4 revision rounds)
-5. *(Optional)* Pipeline runs training/evaluation commands from the spec and
-   checks metrics against acceptance thresholds
+5. *(Optional)* Pipeline runs commands from the spec to produce artifacts,
+   validates outputs, and checks acceptance criteria
 
 The agents cannot see each other's prompts. The reviewer cannot modify files.
 Tests are frozen after review -- the implementer cannot change them. All of
@@ -42,8 +42,8 @@ A spec is a markdown file with:
 - **Acceptance Criteria** -- what the tests must verify
 
 If the spec includes an `## Artifact Pipeline` section (YAML), the pipeline
-will also run training commands, check output files, evaluate metrics, and
-verify acceptance thresholds automatically.
+will also run commands to produce artifacts, check output files, validate
+results, and verify acceptance criteria automatically.
 
 ## State & Resume
 
@@ -94,7 +94,7 @@ GEMINI_MODEL_ECONOMY, GEMINI_MODEL_PREMIUM
 - **Reviewer immutability** -- repository hash is checked before and after
   every review stage
 - **Retry loop** -- artifact failures trigger an implementer fix, re-verify
-  tests, then restart from training
+  tests, then restart artifact production
 - **Scope enforcement** -- agents receive only the approved spec; they cannot
   expand scope beyond it
 
