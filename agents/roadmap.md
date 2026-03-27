@@ -37,19 +37,28 @@ Completed 2026-03-26. Trainable CNN replaces frozen ConvNeXt. val_acc=76.8% (bes
 
 **Two portfolio stories:** (1) The VLA agent (ML), (2) The agentic TDD pipeline (engineering/open-source contribution)
 
-## Step 6: Pipeline Generalization (Post MVP-3) -- NEXT
+## Step 6: Pipeline Generalization (Post MVP-3) -- DONE
 
-The agentic TDD pipeline is a standalone portfolio asset and potential open-source tool. After MVP-3, the priority shifts from the ML project to the pipeline itself.
+Completed 2026-03-26.
 
-**What to do:**
-1. **Generalize pipeline code** -- Remove project-specific assumptions from `src/vla_agent/pipeline/core.py` and providers. The pipeline should work for any repo, not just vla-game-agent. Extract into a reusable package or standalone repo.
-2. **Add Gemini provider** -- Spec exists (`specs/gemini-provider-spec.md`). Straightforward adapter following the Codex provider pattern.
-3. **Actualize Claude provider** -- `providers/claude.py` may have drifted during Codex provider refinements (stages 6-8 retry loop, prompt-via-stdin, encoding fixes). Verify it still works end-to-end and align with Codex provider capabilities.
-4. **Verify all providers work** -- Run a simple spec through each provider (Claude, Codex, Gemini) to confirm the provider-agnostic promise is real.
+**What was done:**
+1. **`PipelineConfig` dataclass** -- All hardcoded paths/commands in `core.py` replaced with config fields (`specs_dir`, `tests_dir`, `source_dirs`, `state_dir`, `test_command`, `context_file`, `hash_targets`, `prompts_dir`). Defaults match vla-game-agent layout.
+2. **Package-relative prompts** -- `PromptBuilder` defaults to `Path(__file__).parent / "prompts"` (works from any repo without config).
+3. **TOML config loading** -- `scripts/run_pipeline.py --config pipeline.toml` loads `PipelineConfig` from file.
+4. **Repo-root override** -- `scripts/run_pipeline.py --repo-root <path>` targets any repository.
+5. **Gemini provider** -- `providers/gemini.py` added, uses local Gemini CLI with stdin-based prompting and JSON output.
+6. **Provider `state_dir` contract** -- `Provider.run_role()` now receives `state_dir` from the pipeline, eliminating hardcoded `.pipeline-state` in adapters.
+7. **Prompt templates genericized** -- `.md` files reference "configured tests directory" / "configured test command" instead of hardcoded paths.
 
-**Why this matters:**
-- Most "AI coding" demos are one-shot generation. A multi-stage, self-correcting pipeline with quality gates is genuinely novel.
-- Provider-agnostic design means it's not locked to one vendor -- but only if all providers actually work.
-- As a standalone tool, this has community value beyond the VLA project.
+**E2E validation (see `specs/pipeline-e2e-testing-plan.md`):**
+
+| Repo | Codex | Claude | Gemini |
+|------|-------|--------|--------|
+| vla-game-agent (default config) | DONE | DONE | DONE |
+| Fresh repo (custom config) | DONE | -- | DONE |
+
+**Remaining:**
+- **Extract as standalone package** -- The pipeline still lives in `src/vla_agent/pipeline/`. Could be extracted to its own repo/package.
+- **Claude provider cleanup** -- Claude returns full JSON envelope in reviewer output (works via fallback normalization, but adapter could extract `structured_output` directly).
 
 **ML side is complete after MVP-3.** Further VLA improvements (more tasks, RL, attention-based memory) are diminishing portfolio returns. The experiment progression tells a complete story.

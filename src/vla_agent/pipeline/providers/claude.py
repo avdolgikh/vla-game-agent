@@ -75,6 +75,7 @@ class ClaudeProvider:
         role: str,
         prompt: str,
         repo_root: Path,
+        state_dir: Path,
         schema: dict[str, Any] | None = None,
     ) -> ProviderExecution:
         config = self.role_configs[role]

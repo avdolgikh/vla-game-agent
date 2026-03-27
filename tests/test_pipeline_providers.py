@@ -78,10 +78,13 @@ def test_codex_provider_reads_last_message_from_workspace_scratch(tmp_path: Path
 
     monkeypatch.setattr("vla_agent.pipeline.providers.codex.subprocess.run", fake_run)
 
+    state_dir = tmp_path / ".pipeline-state"
+    state_dir.mkdir(parents=True, exist_ok=True)
     result = provider.run_role(
         role="implementer",
         prompt="Implement code",
         repo_root=tmp_path,
+        state_dir=state_dir,
     )
 
     assert result.output == "final codex answer"
@@ -112,11 +115,14 @@ def test_codex_provider_surfaces_process_diagnostics_on_failure(tmp_path: Path, 
 
     monkeypatch.setattr("vla_agent.pipeline.providers.codex.subprocess.run", fake_run)
 
+    state_dir = tmp_path / ".pipeline-state"
+    state_dir.mkdir(parents=True, exist_ok=True)
     with pytest.raises(PipelineError) as exc_info:
         provider.run_role(
             role="reviewer",
             prompt="Review code",
             repo_root=tmp_path,
+            state_dir=state_dir,
         )
 
     message = str(exc_info.value)

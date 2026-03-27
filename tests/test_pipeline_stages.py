@@ -16,6 +16,7 @@ from vla_agent.pipeline.core import (
     AcceptanceConfig,
     CheckResult,
     MetricsCheck,
+    PipelineConfig,
     PipelineError,
     PipelineRunner,
     evaluate_acceptance,
@@ -35,7 +36,7 @@ class DummyProvider:
 
     name = "dummy"
 
-    def run_role(self, *, role, prompt, repo_root, schema=None):
+    def run_role(self, *, role, prompt, repo_root, state_dir, schema=None):
         return ProviderExecution(
             provider=self.name,
             role=role,
@@ -105,7 +106,7 @@ def _setup_pipeline_fs(tmp_path, spec_text, state_stage="CODE_REVIEWED"):
     """Create minimum filesystem for pipeline runner tests at given stage."""
     (tmp_path / "specs").mkdir(exist_ok=True)
     (tmp_path / "specs" / "demo-spec.md").write_text(spec_text, encoding="utf-8")
-    prompts_dir = tmp_path / "src" / "vla_agent" / "pipeline" / "prompts"
+    prompts_dir = tmp_path / "prompts"
     prompts_dir.mkdir(parents=True, exist_ok=True)
     for role in ("test_writer", "implementer", "reviewer"):
         (prompts_dir / f"{role}.md").write_text(f"{role} prompt", encoding="utf-8")
@@ -328,7 +329,12 @@ def test_new_exit_codes_defined():
 def test_load_state_maps_done_to_code_reviewed(tmp_path):
     """Existing state files with stage='DONE' should resume as CODE_REVIEWED."""
     _setup_pipeline_fs(tmp_path, SPEC_WITHOUT_PIPELINE, state_stage="DONE")
-    runner = PipelineRunner(repo_root=tmp_path, task="demo", provider=DummyProvider())
+    runner = PipelineRunner(
+        repo_root=tmp_path,
+        task="demo",
+        provider=DummyProvider(),
+        config=PipelineConfig(prompts_dir="prompts"),
+    )
     state = runner._load_state()
     assert state.stage == "CODE_REVIEWED"
 
@@ -354,7 +360,12 @@ def test_pipeline_completes_artifact_stages(tmp_path, monkeypatch):
         return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
     monkeypatch.setattr("vla_agent.pipeline.core.subprocess.run", fake_run)
-    runner = PipelineRunner(repo_root=tmp_path, task="demo", provider=DummyProvider())
+    runner = PipelineRunner(
+        repo_root=tmp_path,
+        task="demo",
+        provider=DummyProvider(),
+        config=PipelineConfig(prompts_dir="prompts"),
+    )
     result = runner.run()
 
     assert result == EXIT_SUCCESS
@@ -378,7 +389,12 @@ def test_pipeline_runs_training_command(tmp_path, monkeypatch):
         return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
     monkeypatch.setattr("vla_agent.pipeline.core.subprocess.run", fake_run)
-    runner = PipelineRunner(repo_root=tmp_path, task="demo", provider=DummyProvider())
+    runner = PipelineRunner(
+        repo_root=tmp_path,
+        task="demo",
+        provider=DummyProvider(),
+        config=PipelineConfig(prompts_dir="prompts"),
+    )
     runner.run()
 
     training_calls = [c for c in calls if "train.py" in c]
@@ -400,7 +416,12 @@ def test_pipeline_state_includes_metrics(tmp_path, monkeypatch):
         return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
     monkeypatch.setattr("vla_agent.pipeline.core.subprocess.run", fake_run)
-    runner = PipelineRunner(repo_root=tmp_path, task="demo", provider=DummyProvider())
+    runner = PipelineRunner(
+        repo_root=tmp_path,
+        task="demo",
+        provider=DummyProvider(),
+        config=PipelineConfig(prompts_dir="prompts"),
+    )
     runner.run()
 
     state = json.loads((tmp_path / ".pipeline-state" / "demo.json").read_text(encoding="utf-8"))
@@ -424,7 +445,11 @@ def test_training_failure_exits(tmp_path, monkeypatch):
 
     monkeypatch.setattr("vla_agent.pipeline.core.subprocess.run", fake_run)
     runner = PipelineRunner(
-        repo_root=tmp_path, task="demo", provider=DummyProvider(), max_revisions=0
+        repo_root=tmp_path,
+        task="demo",
+        provider=DummyProvider(),
+        max_revisions=0,
+        config=PipelineConfig(prompts_dir="prompts"),
     )
 
     with pytest.raises(PipelineError) as exc_info:
@@ -442,7 +467,11 @@ def test_training_missing_artifact_exits(tmp_path, monkeypatch):
 
     monkeypatch.setattr("vla_agent.pipeline.core.subprocess.run", fake_run)
     runner = PipelineRunner(
-        repo_root=tmp_path, task="demo", provider=DummyProvider(), max_revisions=0
+        repo_root=tmp_path,
+        task="demo",
+        provider=DummyProvider(),
+        max_revisions=0,
+        config=PipelineConfig(prompts_dir="prompts"),
     )
 
     with pytest.raises(PipelineError) as exc_info:
@@ -466,7 +495,11 @@ def test_evaluation_failure_exits(tmp_path, monkeypatch):
 
     monkeypatch.setattr("vla_agent.pipeline.core.subprocess.run", fake_run)
     runner = PipelineRunner(
-        repo_root=tmp_path, task="demo", provider=DummyProvider(), max_revisions=0
+        repo_root=tmp_path,
+        task="demo",
+        provider=DummyProvider(),
+        max_revisions=0,
+        config=PipelineConfig(prompts_dir="prompts"),
     )
 
     with pytest.raises(PipelineError) as exc_info:
@@ -524,7 +557,11 @@ min_checks_pass: 0
 
     monkeypatch.setattr("vla_agent.pipeline.core.subprocess.run", fake_run)
     runner = PipelineRunner(
-        repo_root=tmp_path, task="demo", provider=DummyProvider(), max_revisions=0
+        repo_root=tmp_path,
+        task="demo",
+        provider=DummyProvider(),
+        max_revisions=0,
+        config=PipelineConfig(prompts_dir="prompts"),
     )
 
     with pytest.raises(PipelineError) as exc_info:
@@ -543,7 +580,12 @@ def test_pipeline_skips_artifact_stages_without_section(tmp_path, monkeypatch):
         return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
     monkeypatch.setattr("vla_agent.pipeline.core.subprocess.run", fake_run)
-    runner = PipelineRunner(repo_root=tmp_path, task="demo", provider=DummyProvider())
+    runner = PipelineRunner(
+        repo_root=tmp_path,
+        task="demo",
+        provider=DummyProvider(),
+        config=PipelineConfig(prompts_dir="prompts"),
+    )
     result = runner.run()
 
     assert result == EXIT_SUCCESS
@@ -585,7 +627,12 @@ def test_resume_from_trained_skips_training(tmp_path, monkeypatch):
         return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
     monkeypatch.setattr("vla_agent.pipeline.core.subprocess.run", fake_run)
-    runner = PipelineRunner(repo_root=tmp_path, task="demo", provider=DummyProvider())
+    runner = PipelineRunner(
+        repo_root=tmp_path,
+        task="demo",
+        provider=DummyProvider(),
+        config=PipelineConfig(prompts_dir="prompts"),
+    )
     result = runner.run()
 
     assert result == EXIT_SUCCESS
@@ -616,7 +663,12 @@ def test_artifact_stages_logged(tmp_path, monkeypatch):
         return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
     monkeypatch.setattr("vla_agent.pipeline.core.subprocess.run", fake_run)
-    runner = PipelineRunner(repo_root=tmp_path, task="demo", provider=DummyProvider())
+    runner = PipelineRunner(
+        repo_root=tmp_path,
+        task="demo",
+        provider=DummyProvider(),
+        config=PipelineConfig(prompts_dir="prompts"),
+    )
     runner.run()
 
     log_text = (tmp_path / ".pipeline-state" / "demo.log").read_text(encoding="utf-8")
@@ -640,7 +692,7 @@ class TrackingProvider:
     def __init__(self):
         self.calls = []
 
-    def run_role(self, *, role, prompt, repo_root, schema=None):
+    def run_role(self, *, role, prompt, repo_root, state_dir, schema=None):
         self.calls.append({"role": role, "prompt": prompt})
         return ProviderExecution(
             provider=self.name,
@@ -671,7 +723,12 @@ def test_training_failure_triggers_implementer_fix(tmp_path, monkeypatch):
         return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
     monkeypatch.setattr("vla_agent.pipeline.core.subprocess.run", fake_run)
-    runner = PipelineRunner(repo_root=tmp_path, task="demo", provider=provider)
+    runner = PipelineRunner(
+        repo_root=tmp_path,
+        task="demo",
+        provider=provider,
+        config=PipelineConfig(prompts_dir="prompts"),
+    )
     result = runner.run()
 
     assert result == EXIT_SUCCESS
@@ -739,7 +796,12 @@ min_checks_pass: 0
         return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
     monkeypatch.setattr("vla_agent.pipeline.core.subprocess.run", fake_run)
-    runner = PipelineRunner(repo_root=tmp_path, task="demo", provider=provider)
+    runner = PipelineRunner(
+        repo_root=tmp_path,
+        task="demo",
+        provider=provider,
+        config=PipelineConfig(prompts_dir="prompts"),
+    )
     result = runner.run()
 
     assert result == EXIT_SUCCESS
@@ -760,7 +822,13 @@ def test_artifact_retry_cap_raises(tmp_path, monkeypatch):
         return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
     monkeypatch.setattr("vla_agent.pipeline.core.subprocess.run", fake_run)
-    runner = PipelineRunner(repo_root=tmp_path, task="demo", provider=provider, max_revisions=2)
+    runner = PipelineRunner(
+        repo_root=tmp_path,
+        task="demo",
+        provider=provider,
+        max_revisions=2,
+        config=PipelineConfig(prompts_dir="prompts"),
+    )
 
     with pytest.raises(PipelineError) as exc_info:
         runner.run()
@@ -772,8 +840,6 @@ def test_artifact_retry_cap_raises(tmp_path, monkeypatch):
 
 def test_non_fixable_error_propagates(tmp_path, monkeypatch):
     """Non-fixable errors (e.g., FROZEN_TESTS_MODIFIED) bypass retry loop."""
-    from vla_agent.pipeline.core import EXIT_FROZEN_TESTS_MODIFIED
-
     _setup_pipeline_fs(tmp_path, SPEC_WITH_PIPELINE)
     provider = TrackingProvider()
 
@@ -790,14 +856,17 @@ def test_non_fixable_error_propagates(tmp_path, monkeypatch):
         return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
     monkeypatch.setattr("vla_agent.pipeline.core.subprocess.run", fake_run)
-    runner = PipelineRunner(repo_root=tmp_path, task="demo", provider=provider)
+    runner = PipelineRunner(
+        repo_root=tmp_path,
+        task="demo",
+        provider=provider,
+        config=PipelineConfig(prompts_dir="prompts"),
+    )
 
     # The frozen_tests_hash won't match → should propagate, not retry
     # But wait — frozen test check only happens during implementer fix stages.
     # For a clean test of non-fixable propagation, let's raise directly.
     from vla_agent.pipeline.core import EXIT_TESTS_BROKE_AFTER_REVISION
-
-    original_run_artifact = runner._run_artifact_stage
 
     def failing_artifact_stage(**kwargs):
         raise PipelineError("tests broke", EXIT_TESTS_BROKE_AFTER_REVISION)
@@ -860,7 +929,13 @@ min_checks_pass: 0
 
     monkeypatch.setattr("vla_agent.pipeline.core.subprocess.run", fake_run)
     # max_revisions=1: one retry allowed, then fail
-    runner = PipelineRunner(repo_root=tmp_path, task="demo", provider=provider, max_revisions=1)
+    runner = PipelineRunner(
+        repo_root=tmp_path,
+        task="demo",
+        provider=provider,
+        max_revisions=1,
+        config=PipelineConfig(prompts_dir="prompts"),
+    )
 
     with pytest.raises(PipelineError) as exc_info:
         runner.run()

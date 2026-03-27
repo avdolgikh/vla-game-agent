@@ -50,6 +50,8 @@ The project demonstrates this shift in a clean, minimal setting. The core result
 | MVP-2.3 | Domain adaptation (trainable CNN replacing frozen ConvNeXt) | **Done** -- val_acc=76.8%, collect_wood 38%/place_table 76%/collect_stone 6% |
 | Pipeline-ext | Artifact produce/validate/accept pipeline stages | **Done** -- stages 6-8 with implementer retry loop, 34 tests passing |
 | MVP-3 | Portfolio polish | **Done** -- README, report.md, pipeline docs, plots, 9 demo videos |
+| Pipeline-gen | Pipeline generalization (`PipelineConfig`) | **Done** -- all hardcodings replaced, TOML config, `--repo-root`, 53 pipeline tests |
+| Gemini provider | `--provider gemini` via local Gemini CLI | **Done** -- adapter in `providers/gemini.py`, e2e validated on smoke-test |
 
 ---
 
@@ -86,6 +88,9 @@ spec (human-approved) -> tests -> test review -> implement -> validate -> code r
 - Implementation is written against frozen tests.
 - After tests pass, a validation stage runs scripts/code from the spec end-to-end.
 - No ad-hoc coding outside this pipeline.
+- Pipeline is fully configurable via `PipelineConfig` (or `--config pipeline.toml`).
+- Supports three providers: `--provider codex`, `--provider claude`, `--provider gemini`.
+- Can target any repo via `--repo-root <path>`.
 
 ### Rule #4: Spec-Driven Development
 
@@ -177,12 +182,17 @@ spec (human-approved) -> tests -> test review -> implement -> validate -> code r
 ## Package Layout
 
 ```text
-src/vla_agent/         # library code (no prints, no scripts)
-scripts/               # runnable scripts (CLI entry points)
-tests/                 # pytest tests
-specs/                 # approved specs
-agents/                # detail docs (decisions, experiments, roadmap)
-docs/                  # public documentation and assets
+src/vla_agent/                    # library code (no prints, no scripts)
+  pipeline/                       # agentic TDD pipeline core
+    core.py                       # PipelineConfig, PipelineRunner, PromptBuilder
+    providers/                    # provider adapters (claude, codex, gemini)
+    prompts/                      # bundled role prompt templates (.md)
+scripts/                          # runnable scripts (CLI entry points)
+  run_pipeline.py                 # pipeline CLI (--provider, --config, --repo-root)
+tests/                            # pytest tests
+specs/                            # approved specs
+agents/                           # detail docs (decisions, experiments, roadmap)
+docs/                             # public documentation and assets
 ```
 
 ## Conventions

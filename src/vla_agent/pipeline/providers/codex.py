@@ -46,8 +46,8 @@ class CodexProvider:
         }
         self.executable = Path(os.getenv("APPDATA", "")) / "npm" / "codex.cmd"
 
-    def _scratch_dir(self, repo_root: Path, role: str) -> Path:
-        path = repo_root / ".pipeline-state" / "codex" / role
+    def _scratch_dir(self, state_dir: Path, role: str) -> Path:
+        path = state_dir / "codex" / role
         path.mkdir(parents=True, exist_ok=True)
         return path
 
@@ -96,6 +96,7 @@ class CodexProvider:
         role: str,
         prompt: str,
         repo_root: Path,
+        state_dir: Path,
         schema: dict[str, Any] | None = None,
     ) -> ProviderExecution:
         if not self.executable.exists():
@@ -104,7 +105,8 @@ class CodexProvider:
                 EXIT_PROVIDER_EXEC_FAILED,
             )
         config = self.role_configs[role]
-        scratch_dir = self._scratch_dir(repo_root, role)
+        scratch_root = state_dir
+        scratch_dir = self._scratch_dir(scratch_root, role)
         output_path = scratch_dir / "last_message.txt"
         if output_path.exists():
             output_path.unlink()

@@ -15,6 +15,7 @@ from vla_agent.pipeline.core import (
     EXIT_STAGE_NO_EFFECT,
     EXIT_STATE_PROVIDER_MISMATCH,
     EXIT_TESTS_BROKE_AFTER_REVISION,
+    PipelineConfig,
     PipelineError,
     PipelineRunner,
     PromptBuilder,
@@ -29,7 +30,7 @@ class DummyProvider:
 
     name = "dummy"
 
-    def run_role(self, *, role, prompt, repo_root, schema=None):  # noqa: ANN001
+    def run_role(self, *, role, prompt, repo_root, state_dir, schema=None):  # noqa: ANN001
         return ProviderExecution(
             provider=self.name,
             role=role,
@@ -92,14 +93,14 @@ def test_hash_paths_is_deterministic(tmp_path: Path):
 
 
 def test_prompt_builder_includes_context(tmp_path: Path):
-    prompts_dir = tmp_path / "src" / "vla_agent" / "pipeline" / "prompts"
+    prompts_dir = tmp_path / "prompts"
     prompts_dir.mkdir(parents=True)
     specs_dir = tmp_path / "specs"
     specs_dir.mkdir()
     spec_path = specs_dir / "demo-task-spec.md"
     spec_path.write_text("# Demo spec\n\nAcceptance criteria here.", encoding="utf-8")
     (prompts_dir / "implementer.md").write_text("Base implementer prompt.", encoding="utf-8")
-    builder = PromptBuilder(tmp_path)
+    builder = PromptBuilder(tmp_path, PipelineConfig(prompts_dir="prompts"))
     prompt = builder.render(
         role="implementer",
         task="demo-task",
@@ -119,14 +120,14 @@ def test_prompt_builder_includes_context(tmp_path: Path):
 
 
 def test_prompt_builder_requires_raw_json_for_reviewer(tmp_path: Path):
-    prompts_dir = tmp_path / "src" / "vla_agent" / "pipeline" / "prompts"
+    prompts_dir = tmp_path / "prompts"
     prompts_dir.mkdir(parents=True)
     specs_dir = tmp_path / "specs"
     specs_dir.mkdir()
     spec_path = specs_dir / "demo-task-spec.md"
     spec_path.write_text("# Demo spec", encoding="utf-8")
     (prompts_dir / "reviewer.md").write_text("Base reviewer prompt.", encoding="utf-8")
-    builder = PromptBuilder(tmp_path)
+    builder = PromptBuilder(tmp_path, PipelineConfig(prompts_dir="prompts"))
     prompt = builder.render(
         role="reviewer",
         task="demo-task",
@@ -216,14 +217,14 @@ class RepairingProvider:
             ]
         )
 
-    def run_role(self, *, role, prompt, repo_root, schema=None):  # noqa: ANN001
+    def run_role(self, *, role, prompt, repo_root, state_dir, schema=None):  # noqa: ANN001
         self.calls.append((role, prompt))
         return next(self._outputs)
 
 
 def test_runner_repairs_invalid_reviewer_output_once(tmp_path: Path):
     (tmp_path / "specs").mkdir()
-    (tmp_path / "src" / "vla_agent" / "pipeline" / "prompts").mkdir(parents=True)
+    (tmp_path / "prompts").mkdir(parents=True)
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "test_demo.py").write_text(
         "def test_demo():\n    assert True\n", encoding="utf-8"
@@ -232,17 +233,16 @@ def test_runner_repairs_invalid_reviewer_output_once(tmp_path: Path):
     (tmp_path / "specs" / "demo-spec.md").write_text("# demo spec", encoding="utf-8")
     (tmp_path / "AGENTS.md").write_text("# repo rules", encoding="utf-8")
     (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n", encoding="utf-8")
-    (tmp_path / "src" / "vla_agent" / "pipeline" / "prompts" / "test_writer.md").write_text(
-        "test writer", encoding="utf-8"
-    )
-    (tmp_path / "src" / "vla_agent" / "pipeline" / "prompts" / "implementer.md").write_text(
-        "implementer", encoding="utf-8"
-    )
-    (tmp_path / "src" / "vla_agent" / "pipeline" / "prompts" / "reviewer.md").write_text(
-        "reviewer", encoding="utf-8"
-    )
+    (tmp_path / "prompts" / "test_writer.md").write_text("test writer", encoding="utf-8")
+    (tmp_path / "prompts" / "implementer.md").write_text("implementer", encoding="utf-8")
+    (tmp_path / "prompts" / "reviewer.md").write_text("reviewer", encoding="utf-8")
     provider = RepairingProvider()
-    runner = PipelineRunner(repo_root=tmp_path, task="demo", provider=provider)
+    runner = PipelineRunner(
+        repo_root=tmp_path,
+        task="demo",
+        provider=provider,
+        config=PipelineConfig(prompts_dir="prompts"),
+    )
 
     assert runner.run() == 0
     log_text = (tmp_path / ".pipeline-state" / "demo.log").read_text(encoding="utf-8")
@@ -254,14 +254,14 @@ def test_runner_repairs_invalid_reviewer_output_once(tmp_path: Path):
 
 
 def test_prompt_builder_strips_utf8_bom(tmp_path: Path):
-    prompts_dir = tmp_path / "src" / "vla_agent" / "pipeline" / "prompts"
+    prompts_dir = tmp_path / "prompts"
     prompts_dir.mkdir(parents=True)
     specs_dir = tmp_path / "specs"
     specs_dir.mkdir()
     spec_path = specs_dir / "demo-task-spec.md"
     spec_path.write_bytes("\ufeff# Demo spec".encode("utf-8"))
     (prompts_dir / "reviewer.md").write_bytes("\ufeffBase reviewer prompt.".encode("utf-8"))
-    builder = PromptBuilder(tmp_path)
+    builder = PromptBuilder(tmp_path, PipelineConfig(prompts_dir="prompts"))
     prompt = builder.render(
         role="reviewer",
         task="demo-task",
@@ -289,25 +289,19 @@ def test_runner_fails_when_test_generation_requests_more_input_without_writing_t
     tmp_path: Path,
 ):
     (tmp_path / "specs").mkdir()
-    (tmp_path / "src" / "vla_agent" / "pipeline" / "prompts").mkdir(parents=True)
+    (tmp_path / "prompts").mkdir(parents=True)
     (tmp_path / "tests").mkdir()
     (tmp_path / "specs" / "demo-spec.md").write_text("# demo spec", encoding="utf-8")
     (tmp_path / "AGENTS.md").write_text("# repo rules", encoding="utf-8")
     (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n", encoding="utf-8")
-    (tmp_path / "src" / "vla_agent" / "pipeline" / "prompts" / "test_writer.md").write_text(
-        "test writer", encoding="utf-8"
-    )
-    (tmp_path / "src" / "vla_agent" / "pipeline" / "prompts" / "implementer.md").write_text(
-        "implementer", encoding="utf-8"
-    )
-    (tmp_path / "src" / "vla_agent" / "pipeline" / "prompts" / "reviewer.md").write_text(
-        "reviewer", encoding="utf-8"
-    )
+    (tmp_path / "prompts" / "test_writer.md").write_text("test writer", encoding="utf-8")
+    (tmp_path / "prompts" / "implementer.md").write_text("implementer", encoding="utf-8")
+    (tmp_path / "prompts" / "reviewer.md").write_text("reviewer", encoding="utf-8")
 
     class NoopTestWriterProvider:
         name = "dummy"
 
-        def run_role(self, *, role, prompt, repo_root, schema=None):  # noqa: ANN001
+        def run_role(self, *, role, prompt, repo_root, state_dir, schema=None):  # noqa: ANN001
             return ProviderExecution(
                 provider="dummy",
                 role=role,
@@ -319,7 +313,12 @@ def test_runner_fails_when_test_generation_requests_more_input_without_writing_t
                 ),
             )
 
-    runner = PipelineRunner(repo_root=tmp_path, task="demo", provider=NoopTestWriterProvider())
+    runner = PipelineRunner(
+        repo_root=tmp_path,
+        task="demo",
+        provider=NoopTestWriterProvider(),
+        config=PipelineConfig(prompts_dir="prompts"),
+    )
 
     with pytest.raises(PipelineError) as exc_info:
         runner.run()
@@ -340,7 +339,7 @@ def test_review_requests_missing_inputs_detects_placeholder_feedback():
 
 def test_runner_includes_artifact_snapshot_in_initial_review_prompt(tmp_path: Path):
     (tmp_path / "specs").mkdir()
-    (tmp_path / "src" / "vla_agent" / "pipeline" / "prompts").mkdir(parents=True)
+    (tmp_path / "prompts").mkdir(parents=True)
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "test_demo.py").write_text(
         "def test_demo():\n    assert True\n", encoding="utf-8"
@@ -348,9 +347,7 @@ def test_runner_includes_artifact_snapshot_in_initial_review_prompt(tmp_path: Pa
     (tmp_path / "specs" / "demo-spec.md").write_text("# demo spec", encoding="utf-8")
     (tmp_path / "AGENTS.md").write_text("# repo rules", encoding="utf-8")
     (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n", encoding="utf-8")
-    (tmp_path / "src" / "vla_agent" / "pipeline" / "prompts" / "reviewer.md").write_text(
-        "reviewer", encoding="utf-8"
-    )
+    (tmp_path / "prompts" / "reviewer.md").write_text("reviewer", encoding="utf-8")
 
     class SingleReviewProvider:
         name = "dummy"
@@ -358,7 +355,7 @@ def test_runner_includes_artifact_snapshot_in_initial_review_prompt(tmp_path: Pa
         def __init__(self) -> None:
             self.prompt = ""
 
-        def run_role(self, *, role, prompt, repo_root, schema=None):  # noqa: ANN001
+        def run_role(self, *, role, prompt, repo_root, state_dir, schema=None):  # noqa: ANN001
             self.prompt = prompt
             return ProviderExecution(
                 provider="dummy",
@@ -369,7 +366,12 @@ def test_runner_includes_artifact_snapshot_in_initial_review_prompt(tmp_path: Pa
             )
 
     provider = SingleReviewProvider()
-    runner = PipelineRunner(repo_root=tmp_path, task="demo", provider=provider)
+    runner = PipelineRunner(
+        repo_root=tmp_path,
+        task="demo",
+        provider=provider,
+        config=PipelineConfig(prompts_dir="prompts"),
+    )
     decision = runner._run_review_role(
         prompt="Base review prompt",
         stage_label="Stage 2: Test Review",

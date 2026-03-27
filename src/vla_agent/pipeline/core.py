@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 import hashlib
 import json
-import os
 from pathlib import Path
 import re
 import subprocess
@@ -40,15 +39,27 @@ STAGE_ORDER = {
     "VERIFIED": 8,
 }
 
-REPO_HASH_TARGETS = [
-    ".claude",
-    "AGENTS.md",
-    "pyproject.toml",
-    "scripts",
-    "specs",
-    "src",
-    "tests",
-]
+
+@dataclass
+class PipelineConfig:
+    """Project-structure configuration for the pipeline.
+
+    Defaults match the vla-game-agent repository layout.
+    Override to use the pipeline with any project.
+    """
+
+    specs_dir: str = "specs"
+    spec_pattern: str = "{task}-spec.md"
+    tests_dir: str = "tests"
+    source_dirs: list[str] = field(default_factory=lambda: ["src", "scripts"])
+    state_dir: str = ".pipeline-state"
+    test_command: list[str] = field(default_factory=lambda: ["uv", "run", "python", "-m", "pytest"])
+    context_file: str | None = "AGENTS.md"
+    hash_targets: list[str] = field(
+        default_factory=lambda: ["AGENTS.md", "pyproject.toml", "scripts", "specs", "src", "tests"]
+    )
+    prompts_dir: str | None = None
+
 
 TRANSIENT_PATH_PARTS = {"__pycache__", ".pytest_cache", ".ruff_cache"}
 TRANSIENT_SUFFIXES = {".pyc", ".pyo"}
@@ -166,9 +177,13 @@ class PipelineLogger:
 class PromptBuilder:
     """Renders shared role prompts with stage-specific context."""
 
-    def __init__(self, repo_root: Path) -> None:
+    def __init__(self, repo_root: Path, config: PipelineConfig | None = None) -> None:
         self.repo_root = repo_root
-        self.prompts_dir = repo_root / "src" / "vla_agent" / "pipeline" / "prompts"
+        self.config = config or PipelineConfig()
+        if self.config.prompts_dir:
+            self.prompts_dir = repo_root / self.config.prompts_dir
+        else:
+            self.prompts_dir = Path(__file__).parent / "prompts"
 
     def role_prompt(self, role: str) -> str:
         filename = role.replace("-", "_") + ".md"
@@ -196,10 +211,13 @@ class PromptBuilder:
             f"- Stage: {stage_name}",
             f"- Iteration: {iteration}",
             f"- Spec path: {spec_path.as_posix()}",
-            "- Repo rules path: AGENTS.md",
             "- This pipeline is non-interactive. Do not ask the human for more input; use the embedded spec/context and inspect the repository directly.",
-            "- Tests must be run with `uv run python -m pytest`.",
+            f"- Tests directory: `{self.config.tests_dir}/`",
+            f"- Source directories: {', '.join(f'`{d}/`' for d in self.config.source_dirs)}",
+            f"- Test command: `{' '.join(self.config.test_command)}`",
         ]
+        if self.config.context_file:
+            sections.append(f"- Repo rules path: {self.config.context_file}")
         if feedback:
             sections.extend(["- Reviewer blocking feedback to address:"])
             sections.extend([f"  - {item}" for item in feedback])
@@ -487,17 +505,21 @@ class PipelineRunner:
         task: str,
         provider: Provider,
         max_revisions: int = 4,
+        config: PipelineConfig | None = None,
     ) -> None:
         self.repo_root = repo_root
         self.task = task
         self.provider = provider
         self.max_revisions = max_revisions
-        self.spec_path = repo_root / "specs" / f"{task}-spec.md"
-        self.state_dir = repo_root / ".pipeline-state"
+        self.config = config or PipelineConfig()
+        self.spec_path = (
+            repo_root / self.config.specs_dir / self.config.spec_pattern.format(task=task)
+        )
+        self.state_dir = repo_root / self.config.state_dir
         self.state_file = self.state_dir / f"{task}.json"
         self.log_file = self.state_dir / f"{task}.log"
         self.logger = PipelineLogger(self.log_file)
-        self.prompts = PromptBuilder(repo_root)
+        self.prompts = PromptBuilder(repo_root, self.config)
 
     def _log_stage_header(self, label: str) -> None:
         self.logger.log("")
@@ -578,10 +600,10 @@ class PipelineRunner:
         return state.iteration if state.stage == loop_entry_stage else 0
 
     def _repo_hash(self) -> str:
-        return hash_paths(self.repo_root, REPO_HASH_TARGETS)
+        return hash_paths(self.repo_root, self.config.hash_targets)
 
     def _tests_hash(self) -> str:
-        return hash_paths(self.repo_root, ["tests"])
+        return hash_paths(self.repo_root, [self.config.tests_dir])
 
     def _enforce_reviewer_immutability(self, before_hash: str, stage_label: str) -> None:
         after_hash = self._repo_hash()
@@ -690,9 +712,10 @@ class PipelineRunner:
         after_hash = self._tests_hash()
         if after_hash != before_hash:
             return
-        if allow_existing and any(_iter_hashable_files(self.repo_root, ["tests"])):
+        tests_dir = self.config.tests_dir
+        if allow_existing and any(_iter_hashable_files(self.repo_root, [tests_dir])):
             return
-        base_message = f"FAIL: {stage_label} did not modify tests/."
+        base_message = f"FAIL: {stage_label} did not modify {tests_dir}/."
         if stage_label == "Stage 1: Test Generation":
             raise PipelineError(base_message, EXIT_STAGE_NO_EFFECT)
         if "Revision" in stage_label:
@@ -702,7 +725,7 @@ class PipelineRunner:
             )
         if _stage_requested_more_input(execution.output):
             raise PipelineError(
-                f"FAIL: {stage_label} did not modify tests/ and instead requested more input.",
+                f"FAIL: {stage_label} did not modify {tests_dir}/ and instead requested more input.",
                 EXIT_STAGE_NO_EFFECT,
             )
 
@@ -710,7 +733,7 @@ class PipelineRunner:
         self.logger.log("")
         self.logger.log(label)
         result = subprocess.run(
-            ["uv", "run", "python", "-m", "pytest"],
+            list(self.config.test_command),
             cwd=self.repo_root,
             capture_output=True,
             text=True,
@@ -742,6 +765,7 @@ class PipelineRunner:
             role=role,
             prompt=prompt,
             repo_root=self.repo_root,
+            state_dir=self.state_dir,
             schema=schema,
         )
         self.logger.log(
@@ -762,7 +786,10 @@ class PipelineRunner:
         stage_label: str,
         before_hash: str,
     ) -> ReviewDecision:
-        review_targets = ["tests"] if "Test Review" in stage_label else ["src", "tests", "scripts"]
+        if "Test Review" in stage_label:
+            review_targets = [self.config.tests_dir]
+        else:
+            review_targets = self.config.source_dirs + [self.config.tests_dir]
         artifact_snapshot = self._artifact_snapshot(review_targets)
         review_prompt = (
             prompt
@@ -834,7 +861,7 @@ class PipelineRunner:
                 "The artifact pipeline failed. Diagnose the issue and fix the production code "
                 "or training/evaluation scripts to resolve the error below. "
                 "Do not modify frozen tests. "
-                "Run `uv run python -m pytest` after your fix to ensure tests still pass.\n\n"
+                f"Run `{' '.join(self.config.test_command)}` after your fix to ensure tests still pass.\n\n"
                 "## Error Details\n\n"
                 f"{error_context}"
             ),
@@ -929,8 +956,8 @@ class PipelineRunner:
                 spec_path=self.spec_path,
                 stage_name="Stage 1: Test Generation",
                 stage_instruction=(
-                    "Read the approved spec and AGENTS.md. Write tests for this task covering all "
-                    "acceptance criteria in tests/. Confirm the tests are red with `uv run python -m pytest`. "
+                    f"Read the approved spec{f' and {self.config.context_file}' if self.config.context_file else ''}. Write tests for this task covering all "
+                    f"acceptance criteria in {self.config.tests_dir}/. Confirm the tests are red with `{' '.join(self.config.test_command)}`. "
                     "Do not write production code."
                 ),
             )
@@ -990,7 +1017,7 @@ class PipelineRunner:
                     stage_name="Stage 2b: Test Revision",
                     stage_instruction=(
                         "Revise the test suite to address the reviewer blocking feedback. "
-                        "Do not touch production code. Re-run `uv run python -m pytest` after revisions."
+                        f"Do not touch production code. Re-run `{' '.join(self.config.test_command)}` after revisions."
                     ),
                     iteration=iteration,
                     reviewer_feedback=decision.blocking,
@@ -1022,7 +1049,7 @@ class PipelineRunner:
                 stage_instruction=(
                     "Read the approved spec and frozen tests. Implement the minimal production code "
                     "needed to make the tests pass. Do not modify frozen tests. Run "
-                    "`uv run python -m pytest` to verify."
+                    f"`{' '.join(self.config.test_command)}` to verify."
                 ),
             )
             self._run_role(
@@ -1042,10 +1069,10 @@ class PipelineRunner:
                 spec_path=self.spec_path,
                 stage_name="Stage 4: Validation",
                 stage_instruction=(
-                    "Validate the implementation by running `uv run python -m pytest`. Fix any test failures. "
+                    f"Validate the implementation by running `{' '.join(self.config.test_command)}`. Fix any test failures. "
                     "Do not modify frozen tests. Do NOT run training scripts — training is handled "
                     "by a later pipeline stage. If you need to verify a script's CLI args parse "
-                    "correctly, use `--help` only. Always use `--device cuda` when device is relevant."
+                    "correctly, use `--help` only."
                 ),
             )
             self._run_role(
@@ -1069,7 +1096,7 @@ class PipelineRunner:
                     stage_name="Stage 5: Code Review",
                     stage_instruction=(
                         "Review only the implementation and frozen tests relevant to the approved spec for this task. Ignore unrelated workspace changes outside the spec scope. "
-                        "Observe test status with `uv run python -m pytest` and return only the "
+                        f"Observe test status with `{' '.join(self.config.test_command)}` and return only the "
                         "canonical review decision JSON."
                     ),
                     iteration=iteration,
@@ -1098,7 +1125,7 @@ class PipelineRunner:
                     stage_name="Stage 5b: Code Revision",
                     stage_instruction=(
                         "Revise the implementation to address the reviewer blocking feedback. "
-                        "Do not modify frozen tests. Re-run `uv run python -m pytest` after revisions."
+                        f"Do not modify frozen tests. Re-run `{' '.join(self.config.test_command)}` after revisions."
                     ),
                     iteration=iteration,
                     reviewer_feedback=decision.blocking,
@@ -1220,7 +1247,13 @@ class PipelineRunner:
         return EXIT_SUCCESS
 
 
-def run_from_cli(task: str, provider: Provider, repo_root: Path, max_revisions: int = 4) -> int:
+def run_from_cli(
+    task: str,
+    provider: Provider,
+    repo_root: Path,
+    max_revisions: int = 4,
+    config: PipelineConfig | None = None,
+) -> int:
     """CLI entry point helper."""
 
     runner = PipelineRunner(
@@ -1228,6 +1261,7 @@ def run_from_cli(task: str, provider: Provider, repo_root: Path, max_revisions: 
         task=task,
         provider=provider,
         max_revisions=max_revisions,
+        config=config,
     )
     try:
         return runner.run()
