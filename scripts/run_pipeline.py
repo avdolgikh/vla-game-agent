@@ -11,6 +11,7 @@ from vla_agent.pipeline.core import PipelineConfig, run_from_cli
 from vla_agent.pipeline.providers.claude import ClaudeProvider
 from vla_agent.pipeline.providers.codex import CodexProvider
 from vla_agent.pipeline.providers.gemini import GeminiProvider
+from vla_agent.pipeline.providers.opencode import OpenCodeProvider
 
 
 def load_config(path: Path) -> PipelineConfig:
@@ -27,7 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("task", help="Task id. Spec is resolved as specs/<task>-spec.md.")
     parser.add_argument(
         "--provider",
-        choices=["claude", "codex", "gemini"],
+        choices=["claude", "codex", "gemini", "opencode"],
         required=True,
         help="Provider runtime to execute pipeline stages with.",
     )
@@ -62,6 +63,7 @@ def main() -> int:
         "claude": ClaudeProvider,
         "codex": CodexProvider,
         "gemini": GeminiProvider,
+        "opencode": OpenCodeProvider,
     }
     provider = providers[args.provider]()
     return run_from_cli(

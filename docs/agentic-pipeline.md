@@ -104,9 +104,76 @@ class Provider(Protocol):
 |----------|---------|--------|
 | `codex` | OpenAI Codex CLI | Active, battle-tested |
 | `claude` | Claude Code CLI | Implemented, needs actualization |
-| `gemini` | Gemini CLI (local) | Spec ready, not yet implemented |
+| `gemini` | Gemini CLI | Active, e2e validated |
+| `opencode` | OpenCode CLI + Ollama (local) | Active, e2e validated |
 
-Adding a new provider means writing one adapter file (~50-100 lines) that translates the `run_role` call into the provider's CLI invocation.
+Adding a new provider means writing one adapter file that translates the `run_role` call into the provider's CLI invocation.
+
+### OpenCode Provider (Local Models)
+
+The `opencode` provider runs the pipeline entirely on local hardware using [OpenCode](https://opencode.ai) + [Ollama](https://ollama.com). **No cloud API calls, no cost.**
+
+**Prerequisites:**
+
+1. **Ollama** — local model server:
+   ```bash
+   # Install: https://ollama.com/download
+   # Pull a model (e.g. qwen3.5, 9.7B, ~6GB):
+   ollama pull qwen3.5
+   # Start the server (if not already running):
+   ollama serve
+   ```
+
+2. **OpenCode** — AI coding CLI:
+   ```bash
+   npm install -g @anthropic-ai/opencode
+   ```
+
+3. **Project config** — `opencode.json` in the repo root registers the Ollama provider:
+   ```json
+   {
+     "$schema": "https://opencode.ai/config.json",
+     "provider": {
+       "ollama": {
+         "npm": "@ai-sdk/openai-compatible",
+         "name": "Ollama (local)",
+         "options": { "baseURL": "http://localhost:11434/v1" },
+         "models": {
+           "qwen3.5:latest": { "name": "Qwen 3.5 9.7B" }
+         }
+       }
+     }
+   }
+   ```
+
+**Usage:**
+
+```bash
+uv run python scripts/run_pipeline.py <task-id> --provider opencode
+```
+
+Override the model via environment variable:
+
+```bash
+OPENCODE_MODEL=ollama/qwen3.5:latest uv run python scripts/run_pipeline.py <task-id> --provider opencode
+```
+
+**How it works (local model adaptations):**
+
+Local models via Ollama cannot use OpenCode's tool system (no function calling). The provider compensates:
+
+1. **FILE: block protocol** — Injects instructions telling the model to output files in a structured format (`FILE: path\n```\ncontent\n````) instead of using write/edit tools. The provider parses these blocks from stdout and writes them to disk.
+
+2. **Artifact snapshot replacement** — For the reviewer role, replaces the pipeline's size-limited artifact snapshot with full contents of task-relevant files. This is critical: without it, the reviewer hallucinates missing test coverage because it cannot read files via tools.
+
+3. **ANSI stripping** — Removes terminal escape codes from OpenCode's formatted output.
+
+**Tested models:**
+
+| Model | Params | Test Writer | Reviewer | Notes |
+|-------|--------|-------------|----------|-------|
+| `gemma4:e4b` | 4B | Fair | Fails (can't produce JSON) | Too small for structured output |
+| `qwen3.5:latest` | 9.7B | Excellent | Good (with full snapshots) | Recommended default |
 
 ---
 

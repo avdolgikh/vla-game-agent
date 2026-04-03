@@ -52,6 +52,7 @@ The project demonstrates this shift in a clean, minimal setting. The core result
 | MVP-3 | Portfolio polish | **Done** -- README, report.md, pipeline docs, plots, 9 demo videos |
 | Pipeline-gen | Pipeline generalization (`PipelineConfig`) | **Done** -- all hardcodings replaced, TOML config, `--repo-root`, 53 pipeline tests |
 | Gemini provider | `--provider gemini` via local Gemini CLI | **Done** -- adapter in `providers/gemini.py`, e2e validated on smoke-test |
+| OpenCode provider | `--provider opencode` via OpenCode CLI + Ollama (local) | **Done** -- adapter in `providers/opencode.py`, e2e validated on smoke-test with `ollama/qwen3.5:latest` |
 
 ---
 
@@ -89,7 +90,7 @@ spec (human-approved) -> tests -> test review -> implement -> validate -> code r
 - After tests pass, a validation stage runs scripts/code from the spec end-to-end.
 - No ad-hoc coding outside this pipeline.
 - Pipeline is fully configurable via `PipelineConfig` (or `--config pipeline.toml`).
-- Supports three providers: `--provider codex`, `--provider claude`, `--provider gemini`.
+- Supports four providers: `--provider codex`, `--provider claude`, `--provider gemini`, `--provider opencode`.
 - Can target any repo via `--repo-root <path>`.
 
 ### Rule #4: Spec-Driven Development

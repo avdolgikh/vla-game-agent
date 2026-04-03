@@ -251,3 +251,56 @@ uv run python scripts/evaluate_policy.py \
 ## CUDA in Venv
 
 The `.venv` now has CUDA torch (`torch==2.7.1+cu118`) configured via `[[tool.uv.index]]` in `pyproject.toml`. This eliminates the need for any global-vs-local env switching. All commands use `uv run python` uniformly.
+
+---
+
+## OpenCode Provider (Local Models)
+
+### Goal
+
+Add a 4th pipeline provider using OpenCode CLI + Ollama for fully local (zero-cost) pipeline execution.
+
+### Deliverables
+
+- `src/vla_agent/pipeline/providers/opencode.py` — provider adapter
+- `opencode.json` — project-level OpenCode config registering Ollama provider
+- Updated `scripts/run_pipeline.py` — `--provider opencode` wired in
+
+### Key Results
+
+E2E smoke-test pipeline completed successfully with `ollama/qwen3.5:latest` (9.7B, Q4_K_M, fully local):
+- Stage 1 (Test Generation): 5 clean tests covering all 4 acceptance criteria
+- Stage 2 (Test Review): Approved on iteration 0
+- Stage 3 (Implementation): Correct `set_seed` and `get_rng` implementation
+- Stage 4 (Validation): Passed
+- Stage 5 (Code Review): Approved on iteration 0
+- All 148 unit tests pass (5 new + 143 existing)
+
+### Model Evaluation
+
+| Model | Params | Test Writer | Reviewer | Verdict |
+|-------|--------|-------------|----------|---------|
+| `gemma4:e4b` | 4B | Produces code but doesn't use tools | Cannot produce valid JSON schema | Too small |
+| `qwen3.5:latest` | 9.7B | Excellent — correct, clean, all ACs covered | Good with full file snapshots | **Recommended** |
+
+### Key Challenges & Solutions
+
+1. **No tool use**: Local Ollama models don't support OpenCode's function calling. Fix: FILE: block protocol (model outputs files as structured text, provider parses and writes them).
+2. **Reviewer hallucinations**: With truncated file snapshots, the reviewer falsely claimed tests were missing. Fix: Provider replaces truncated snapshots with full task-relevant file contents.
+3. **Windows npm shim**: OpenCode installed via npm needs `.cmd` shim path (`%APPDATA%/npm/opencode.cmd`).
+4. **Project-level config**: `opencode.json` must be in the repo root for Ollama provider registration to work.
+
+### Commands
+
+```bash
+# Prerequisites
+ollama pull qwen3.5                    # download model (~6GB)
+ollama serve                            # start server
+npm install -g @anthropic-ai/opencode   # install opencode
+
+# Run pipeline
+uv run python scripts/run_pipeline.py smoke-test --provider opencode
+
+# Custom model
+OPENCODE_MODEL=ollama/gemma4:e4b uv run python scripts/run_pipeline.py smoke-test --provider opencode
+```
